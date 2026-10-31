@@ -29,15 +29,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure preinstalled Android SDK
-        run: |
-          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
-          echo "/usr/local/lib/android/sdk/cmdline-tools/16.0/bin" >> "$GITHUB_PATH"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # setup-android@v3 defaults to the removed "tools" package.
+          # Command-line tools and sdkmanager are installed even when packages is empty.
+          packages: ''
 
-      - name: Accept Android SDK licenses and install API 35
-        run: |
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null
-          sdkmanager --sdk_root="$ANDROID_HOME" "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android API 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
