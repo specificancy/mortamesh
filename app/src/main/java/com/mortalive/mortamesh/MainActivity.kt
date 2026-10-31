@@ -3167,15 +3167,16 @@ class MainActivity : Activity() {
                         decrypted
                     } else {
                         if (!authenticatedChatIngressLimiter.allow(decrypted.fromNodeId)) return@execute
-                        if (!replayGuard.acceptIfNew(messageId)) return@execute
+                        if (!replayGuard.acceptIfNew(decrypted.fromNodeId, messageId)) return@execute
                         decrypted
                     }
                 } else {
                     // Relays cannot decrypt; use only a bounded in-memory forwarding cache so
                     // unpinned, merely well-signed traffic cannot evict recipient replay history.
+                    val relayCacheKey = "${envelope.optString("from")}|$messageId"
                     synchronized(seenMeshPackets) {
-                        if (seenMeshPackets.containsKey(messageId)) return@execute
-                        seenMeshPackets[messageId] = System.currentTimeMillis()
+                        if (seenMeshPackets.containsKey(relayCacheKey)) return@execute
+                        seenMeshPackets[relayCacheKey] = System.currentTimeMillis()
                     }
                     pruneSeenCaches()
                     null
@@ -3281,10 +3282,11 @@ class MainActivity : Activity() {
     ) {
         pruneSeenCaches()
         val messageId = envelope.optString("id")
-        if (messageId.isBlank()) return
+        val packetCacheKey = "${opened?.fromNodeId ?: envelope.optString("from")}|$messageId"
+        if (messageId.isBlank() || packetCacheKey.startsWith("|")) return
         if (!deduplicated) synchronized(seenMeshPackets) {
-            if (seenMeshPackets.containsKey(messageId)) return
-            seenMeshPackets[messageId] = System.currentTimeMillis()
+            if (seenMeshPackets.containsKey(packetCacheKey)) return
+            seenMeshPackets[packetCacheKey] = System.currentTimeMillis()
         }
         val destination = envelope.optString("to")
         if (destination == localNodeId) {
@@ -3378,7 +3380,8 @@ class MainActivity : Activity() {
                 }
                 // Outbound IDs are cached locally for loop suppression; the durable replay ledger
                 // is reserved for successfully decrypted incoming messages.
-                synchronized(seenMeshPackets) { seenMeshPackets[envelope.optString("id")] = System.currentTimeMillis() }
+                val packetCacheKey = "${envelope.optString("from")}|${envelope.optString("id")}"
+                synchronized(seenMeshPackets) { seenMeshPackets[packetCacheKey] = System.currentTimeMillis() }
                 pruneSeenCaches()
                 if (isWifi || Looper.myLooper() == Looper.getMainLooper()) {
                     sendTextToPeer(firstHop, wire)
