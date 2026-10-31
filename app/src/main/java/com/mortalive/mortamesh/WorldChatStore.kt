@@ -71,12 +71,17 @@ internal class WorldChatStore(context: Context) :
                 // New dedupe keys include the signed author's node ID. Treat pre-upgrade
                 // raw UUID rows as legacy global entries until their seven-day expiry.
                 val postKey = post.authorNodeId + "|" + post.postId
-                val already = db.query(
+                val alreadySeen = db.query(
                     TABLE_SEEN, arrayOf(COL_POST_ID),
                     COL_POST_ID + " = ? OR " + COL_POST_ID + " = ?",
                     arrayOf(postKey, post.postId), null, null, null, "1"
                 ).use { it.moveToFirst() }
-                if (already) {
+                val alreadyStored = db.query(
+                    TABLE_POSTS, arrayOf(COL_POST_ID),
+                    COL_AUTHOR + " = ? AND (" + COL_POST_ID + " = ? OR " + COL_POST_ID + " = ?)",
+                    arrayOf(post.authorNodeId, postKey, post.postId), null, null, null, "1"
+                ).use { it.moveToFirst() }
+                if (alreadySeen || alreadyStored) {
                     db.setTransactionSuccessful()
                     return InsertResult.DUPLICATE
                 }
