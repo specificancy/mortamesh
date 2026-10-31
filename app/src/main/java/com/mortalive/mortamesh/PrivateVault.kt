@@ -109,8 +109,40 @@ class PrivateVault(private val context: Context) {
     private val indexTempFile = File(vaultDir, "vault_index.enc.tmp")
     private val pinPrefs = context.getSharedPreferences("morta_vault_pin", Context.MODE_PRIVATE)
     private val items = linkedMapOf<String, Item>()
+    // Set when the index could not be read for a possibly transient reason (e.g. Keystore). While
+    // set, nothing is written, so a good index is never replaced by an empty one.
+    @Volatile private var indexUnavailable = false
+    private var indexLoadedOk = false
 
-    init { loadIndex() }
+    private class InvalidVaultIndexFormatException : Exception()
+
+    init {
+        loadIndex()
+        cleanupOrphanFiles()
+    }
+
+    @Synchronized fun isUnavailable(): Boolean = indexUnavailable
+
+    /** Re-attempt reading the index after a transient failure. Returns true when the vault is usable. */
+    @Synchronized fun retryLoad(): Boolean {
+        if (!indexUnavailable) return true
+        indexUnavailable = false
+        items.clear()
+        loadIndex()
+        cleanupOrphanFiles()
+        return !indexUnavailable
+    }
+
+    /** Remove encrypted files that no readable index references (crash leftovers). Never runs after an index error. */
+    private fun cleanupOrphanFiles() {
+        if (!indexLoadedOk || indexUnavailable) return
+        val cutoff = System.currentTimeMillis() - ORPHAN_MIN_AGE_MS
+        try {
+            vaultDir.listFiles { f -> f.isFile && f.name.endsWith(".mmv") }?.forEach { f ->
+                if (!items.containsKey(f.name.removeSuffix(".mmv")) && f.lastModified() < cutoff) f.delete()
+            }
+        } catch (_: Exception) { }
+    }
 
     fun hasPin(): Boolean = !pinPrefs.getString("hash", null).isNullOrBlank() && !pinPrefs.getString("salt", null).isNullOrBlank()
 
@@ -266,6 +298,8 @@ class PrivateVault(private val context: Context) {
 
     @Synchronized fun beginIncoming(transferId: String, originalName: String, mimeType: String, expectedBytes: Long, peerName: String): IncomingWrite? {
         if (expectedBytes !in 1L..MAX_MEDIA_BYTES) return null
+        // Refuse a transfer that cannot fit, instead of filling storage with a partial encrypted file.
+        if (vaultDir.usableSpace < expectedBytes + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
         var raw: FileOutputStream? = null
@@ -397,6 +431,7 @@ class PrivateVault(private val context: Context) {
     }
 
     @Synchronized private fun saveIndex(): Boolean {
+        if (indexUnavailable) return false
         return try {
             val array = JSONArray()
             items.values.forEach { item ->
@@ -433,7 +468,7 @@ class PrivateVault(private val context: Context) {
         try {
             FileInputStream(indexFile).use { input ->
                 val magic = ByteArray(MAGIC.size); readFully(input, magic)
-                if (!magic.contentEquals(MAGIC)) return
+                if (!magic.contentEquals(MAGIC)) throw InvalidVaultIndexFormatException()
                 val iv = ByteArray(IV_BYTES); readFully(input, iv)
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, getKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
@@ -452,11 +487,19 @@ class PrivateVault(private val context: Context) {
                     if (item.id.isNotBlank() && File(vaultDir, "${item.id}.mmv").isFile) items[item.id] = item
                 }
             }
-        } catch (_: Exception) {
+            indexLoadedOk = true
+        } catch (e: Exception) {
             items.clear()
+            val permanent = e is javax.crypto.BadPaddingException || e is InvalidVaultIndexFormatException ||
+                e is java.io.EOFException || e is javax.crypto.IllegalBlockSizeException || e is org.json.JSONException
+            if (!permanent) {
+                // Possibly a transient Keystore/provider failure: leave the index untouched and block writes.
+                indexUnavailable = true
+                return
+            }
             // Preserve a corrupt/unreadable index for diagnosis instead of silently overwriting it.
             if (indexFile.exists()) {
-                val unreadable = File(vaultDir, "vault_index.enc.unreadable")
+                val unreadable = File(vaultDir, "vault_index.enc.unreadable-" + System.currentTimeMillis())
                 try { Os.rename(indexFile.absolutePath, unreadable.absolutePath) } catch (_: Exception) { }
             }
         }
@@ -474,6 +517,8 @@ class PrivateVault(private val context: Context) {
         // Media is streamed to encrypted files; preview decoding is separately downsampled.
         const val MAX_MEDIA_BYTES = 2L * 1024L * 1024L * 1024L
         const val MAX_IMAGE_READ_BYTES = 20L * 1024L * 1024L
+        private const val MIN_FREE_BYTES = 64L * 1024L * 1024L
+        private const val ORPHAN_MIN_AGE_MS = 60L * 60L * 1000L
         private const val KEY_ALIAS = "morta_mesh_private_media_key_v1"
         private const val IV_BYTES = 12
         private const val GCM_TAG_BITS = 128
