@@ -49,8 +49,8 @@ internal data class WorldChatPost(
 
 /**
  * Bounded store for intentionally public mesh posts and durable de-duplication IDs.
- * Posts stay in the app-private database for seven days / 1,000 items; seen IDs remain for
- * seven days / 50,000 items so trimmed posts are not re-inserted by a relay loop.
+ * Posts stay in the app-private database for seven days / 1,000 items; up to 220,000
+ * distinct signed post IDs are retained for seven days without evicting still-live IDs.
  */
 internal class WorldChatStore(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DATABASE_NAME, null, DATABASE_VERSION) {
