@@ -1319,6 +1319,9 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun nodeForTransport(transportId: String): String? =
+        synchronized(physicalNodeByTransport) { physicalNodeByTransport[transportId] }
+
     private fun stableRecipientId(peerId: String): String {
         val nodeId = resolveTargetNode(peerId)?.takeIf { it.isNotBlank() && it != localNodeId }
         return nodeId?.let { MESH_PREFIX + it } ?: peerId
@@ -1337,7 +1340,7 @@ class MainActivity : Activity() {
                 (clientReady.contains(id) || (serverDevices.containsKey(id) && subscribedDevices.contains(id)))
         }
         return connectedTransportIds().firstOrNull { id ->
-            physicalNodeByTransport[id] == nodeId && when (required) {
+            nodeForTransport(id) == nodeId && when (required) {
                 MediaTransferPolicy.RequiredTransport.WIFI_DIRECT -> id.startsWith(WIFI_PREFIX) && wifiWriters.containsKey(id)
                 MediaTransferPolicy.RequiredTransport.BLUETOOTH_LE -> !id.startsWith(MESH_PREFIX) && bluetoothReady(id)
             }
@@ -2004,7 +2007,7 @@ class MainActivity : Activity() {
 
     private fun showPeerInfo() {
         val peer = activeChatId ?: return
-        val nodeId = if (peer.startsWith(MESH_PREFIX)) peer.removePrefix(MESH_PREFIX) else physicalNodeByTransport[peer]
+        val nodeId = if (peer.startsWith(MESH_PREFIX)) peer.removePrefix(MESH_PREFIX) else nodeForTransport(peer)
         val fingerprint = nodeId?.let { meshSecurity.fingerprintFor(it) }
         val route = nodeId?.let { meshRoutes[it] }
         val transport = when {
@@ -3222,7 +3225,7 @@ class MainActivity : Activity() {
         if (nodeId.isBlank() || nodeId == localNodeId) return
         identityRecords[nodeId] = JSONObject(record.toString())
         if (advertisedHops == 0) {
-            physicalNodeByTransport[sourcePeerId] = nodeId
+            synchronized(physicalNodeByTransport) { physicalNodeByTransport[sourcePeerId] = nodeId }
             peerNames[sourcePeerId] = displayName
             peerNames[MESH_PREFIX + nodeId] = displayName
             persistPeerNames()
@@ -3295,7 +3298,7 @@ class MainActivity : Activity() {
     }
 
     private fun chatIdForNode(nodeId: String, incomingTransport: String?): String {
-        if (incomingTransport != null && physicalNodeByTransport[incomingTransport] == nodeId) return incomingTransport
+        if (incomingTransport != null && nodeForTransport(incomingTransport) == nodeId) return incomingTransport
         val route = meshRoutes[nodeId]
         if (route != null && route.hops == 1 && hasPeerTransport(route.nextHop)) return route.nextHop
         return MESH_PREFIX + nodeId
@@ -3303,7 +3306,7 @@ class MainActivity : Activity() {
 
     private fun resolveTargetNode(chatPeerId: String): String? {
         if (chatPeerId.startsWith(MESH_PREFIX)) return chatPeerId.removePrefix(MESH_PREFIX).takeIf { it.isNotBlank() }
-        return physicalNodeByTransport[chatPeerId]
+        return nodeForTransport(chatPeerId)
             ?: if (chatPeerId.startsWith(WIFI_PREFIX)) meshRoutes.values.firstOrNull { it.nextHop == chatPeerId }?.nodeId else null
     }
 
@@ -3318,7 +3321,7 @@ class MainActivity : Activity() {
             val destination = resolveTargetNode(chatPeerId) ?: return false
             if (destination == localNodeId) return false
             val route = meshRoutes[destination]?.takeIf { System.currentTimeMillis() - it.lastSeen <= MESH_ROUTE_MAX_AGE_MS }
-            val preferredForced = forcedFirstHop?.takeIf { hasPeerTransport(it) && physicalNodeByTransport[it] == destination }
+            val preferredForced = forcedFirstHop?.takeIf { hasPeerTransport(it) && nodeForTransport(it) == destination }
             val routedHop = route?.nextHop?.takeIf { hasPeerTransport(it) }
             // If the cached route just went stale, send to any active neighbor; bounded flooding at
             // relays can still find the recipient while a fresh identity advertisement propagates.
