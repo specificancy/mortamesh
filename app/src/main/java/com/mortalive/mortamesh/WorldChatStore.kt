@@ -77,6 +77,28 @@ internal class WorldChatStore(context: Context) :
                     return InsertResult.DUPLICATE
                 }
 
+                val since = now - RATE_WINDOW_MS
+                // A persisted device-wide budget bounds seven-day dedupe growth across process
+                // restarts and fresh author keys. The in-memory ingress limiter separately bounds
+                // how much signature verification a physical neighbor can request.
+                val recentSeenCount = db.rawQuery(
+                    "SELECT COUNT(*) FROM " + TABLE_SEEN + " WHERE " + COL_SEEN_AT + " >= ?",
+                    arrayOf(since.toString())
+                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else MAX_SEEN_IDS }
+                if (recentSeenCount >= MAX_WORLD_POSTS_PER_MINUTE) {
+                    db.setTransactionSuccessful()
+                    return InsertResult.RATE_LIMITED
+                }
+                val seenCount = db.rawQuery("SELECT COUNT(*) FROM " + TABLE_SEEN, null).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getInt(0) else MAX_SEEN_IDS
+                }
+                // Never evict a still-live signed post ID: eviction would make an old post
+                // replayable during its seven-day validity window.
+                if (seenCount >= MAX_SEEN_IDS) {
+                    db.setTransactionSuccessful()
+                    return InsertResult.RATE_LIMITED
+                }
+
                 // Record the immutable signed ID before applying author quotas. A rate-limited
                 // post is discarded consistently on retransmission instead of being re-verified.
                 val seenValues = ContentValues().apply {
@@ -88,13 +110,11 @@ internal class WorldChatStore(context: Context) :
                     return InsertResult.DUPLICATE
                 }
 
-                val since = now - RATE_WINDOW_MS
                 val count = db.rawQuery(
                     "SELECT COUNT(*) FROM " + TABLE_POSTS + " WHERE " + COL_AUTHOR + " = ? AND " + COL_RECEIVED_AT + " >= ?",
                     arrayOf(post.authorNodeId, since.toString())
                 ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
                 if (count >= MAX_POSTS_PER_MINUTE) {
-                    pruneSeenIds(db)
                     db.setTransactionSuccessful()
                     return InsertResult.RATE_LIMITED
                 }
@@ -111,7 +131,6 @@ internal class WorldChatStore(context: Context) :
                         "SELECT rowid FROM " + TABLE_POSTS + " ORDER BY " + COL_CREATED_AT +
                         " DESC LIMIT -1 OFFSET " + MAX_POSTS + ")"
                 )
-                pruneSeenIds(db)
                 db.setTransactionSuccessful()
                 InsertResult.INSERTED
             } finally {
@@ -155,14 +174,6 @@ internal class WorldChatStore(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = createTables(db)
 
-    private fun pruneSeenIds(db: SQLiteDatabase) {
-        db.execSQL(
-            "DELETE FROM " + TABLE_SEEN + " WHERE rowid IN (" +
-                "SELECT rowid FROM " + TABLE_SEEN + " ORDER BY " + COL_SEEN_AT +
-                " DESC LIMIT -1 OFFSET " + MAX_SEEN_IDS + ")"
-        )
-    }
-
     private fun createTables(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS " + TABLE_POSTS + " (" +
@@ -200,8 +211,11 @@ internal class WorldChatStore(context: Context) :
         private const val RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val RATE_WINDOW_MS = 60_000L
         private const val MAX_POSTS_PER_MINUTE = 5
+        // Device-wide cap: 20 distinct signed IDs/minute => at most 201,620 in any
+        // seven-day replay window (fixed-window boundary headroom included).
+        private const val MAX_WORLD_POSTS_PER_MINUTE = 20
         const val MAX_POSTS = 1_000
         const val SYNC_POSTS = 5
-        private const val MAX_SEEN_IDS = 50_000
+        private const val MAX_SEEN_IDS = 220_000
     }
 }
