@@ -254,7 +254,7 @@ class MainActivity : Activity() {
         const val MAX_WORLD_CHAT_FRAME_BYTES = 3500
         const val MESH_ROUTE_MAX_AGE_MS = 90_000L
         const val MESH_GOSSIP_INTERVAL_MS = 30_000L
-        const val MAX_TEXT_CHUNKS = 32
+        const val MAX_TEXT_CHUNKS = 30
         const val REQUEST_TAKE_PHOTO = 951
         const val REQUEST_RECORD_VIDEO = 952
         const val MEDIA_WIRE_PREFIX = "@MM1|"
@@ -3345,6 +3345,7 @@ class MainActivity : Activity() {
         asChatText: Boolean = false,
         strictFirstHop: Boolean = false
     ): Boolean {
+        if (asChatText) chatSendRateLimited = false
         return try {
             val destination = resolveTargetNode(chatPeerId) ?: return false
             if (destination == localNodeId) return false
@@ -3378,7 +3379,6 @@ class MainActivity : Activity() {
             // Reserve the receiver-mirrored budget for the whole chat message before sending any
             // envelopes, so a split message is accepted or paused as a unit.
             if (asChatText) {
-                chatSendRateLimited = false
                 if (!outgoingChatSendLimiter.allowBatch(destination, payloads.size)) {
                     chatSendRateLimited = true
                     return false
