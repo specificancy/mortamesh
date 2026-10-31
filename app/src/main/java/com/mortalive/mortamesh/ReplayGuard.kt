@@ -34,6 +34,16 @@ internal class ReplayGuard(context: Context) :
                     db.setTransactionSuccessful()
                     return false
                 }
+                // Persist the global accepted-chat budget so restarting the process cannot reset
+                // the seven-day capacity calculation or let one device exceed its intended rate.
+                val recentCount = db.rawQuery(
+                    "SELECT COUNT(*) FROM $TABLE WHERE $COL_SEEN_AT >= ?",
+                    arrayOf((now - RATE_WINDOW_MS).toString())
+                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else MAX_ACCEPTED_PER_MINUTE }
+                if (recentCount >= MAX_ACCEPTED_PER_MINUTE) {
+                    db.setTransactionSuccessful()
+                    return false
+                }
                 val count = db.rawQuery("SELECT COUNT(*) FROM $TABLE", null).use { cursor ->
                     if (cursor.moveToFirst()) cursor.getInt(0) else MAX_ENTRIES
                 }
@@ -107,8 +117,10 @@ internal class ReplayGuard(context: Context) :
         private const val COL_SEEN_AT = "seen_at"
         private const val LEGACY_SENDER = "__legacy_global__"
         private const val RETENTION_MS = 7L * 24 * 60 * 60 * 1000
-        // A 60/min global accepted-chat cap yields at most 604,800 IDs in seven days.
-        // Keep headroom without evicting any still-live replay ID.
+        private const val RATE_WINDOW_MS = 60_000L
+        private const val MAX_ACCEPTED_PER_MINUTE = 60
+        // 60/min over a rolling seven-day window, including fixed-window boundary headroom.
+        // Keep capacity above 604,860 and never evict any still-live replay ID.
         private const val MAX_ENTRIES = 650_000
     }
 }
