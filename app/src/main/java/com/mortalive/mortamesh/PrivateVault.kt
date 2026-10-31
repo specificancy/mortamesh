@@ -176,6 +176,12 @@ class PrivateVault(private val context: Context) {
     /** Remove encrypted files that no readable index references (crash leftovers). Never runs after an index error. */
     private fun cleanupOrphanFiles() {
         if (!indexLoadedOk || indexUnavailable) return
+        // A quarantined index may be the only remaining metadata for older encrypted files.
+        // Never delete those files automatically, even after a new empty index is created.
+        val hasUnreadableIndex = vaultDir.listFiles()?.any {
+            it.isFile && it.name.startsWith("vault_index.enc.unreadable-")
+        } == true
+        if (hasUnreadableIndex) return
         val cutoff = System.currentTimeMillis() - ORPHAN_MIN_AGE_MS
         try {
             vaultDir.listFiles { f -> f.isFile && f.name.endsWith(".mmv") }?.forEach { f ->
@@ -566,7 +572,21 @@ class PrivateVault(private val context: Context) {
     }
 
     private fun loadIndex() {
-        if (!indexFile.isFile) return
+        if (!indexFile.isFile) {
+            val hasEncryptedMedia = vaultDir.listFiles()?.any { it.isFile && it.name.endsWith(".mmv") } == true
+            val hasPendingIndex = indexTempFile.isFile
+            val hasUnreadableIndex = vaultDir.listFiles()?.any {
+                it.isFile && it.name.startsWith("vault_index.enc.unreadable-")
+            } == true
+            if (hasEncryptedMedia || hasPendingIndex || hasUnreadableIndex) {
+                // There may be valid files whose metadata was interrupted or quarantined. Do not
+                // create a replacement index that would make those files appear disposable.
+                indexUnavailable = true
+                return
+            }
+            indexLoadedOk = true // genuinely fresh vault: no index and no encrypted media
+            return
+        }
         try {
             FileInputStream(indexFile).use { input ->
                 val magic = ByteArray(MAGIC.size); readFully(input, magic)
@@ -603,7 +623,15 @@ class PrivateVault(private val context: Context) {
             // Preserve a corrupt/unreadable index for diagnosis instead of silently overwriting it.
             if (indexFile.exists()) {
                 val unreadable = File(vaultDir, "vault_index.enc.unreadable-" + System.currentTimeMillis())
-                try { Os.rename(indexFile.absolutePath, unreadable.absolutePath) } catch (_: Exception) { }
+                val preserved = try {
+                    Os.rename(indexFile.absolutePath, unreadable.absolutePath)
+                    syncVaultDirectory()
+                    true
+                } catch (_: Exception) { false }
+                if (!preserved) {
+                    // If quarantine failed, keep writes blocked rather than replacing the only copy.
+                    indexUnavailable = true
+                }
             }
         }
     }
