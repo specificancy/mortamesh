@@ -77,16 +77,8 @@ internal class WorldChatStore(context: Context) :
                     return InsertResult.DUPLICATE
                 }
 
-                val since = now - RATE_WINDOW_MS
-                val count = db.rawQuery(
-                    "SELECT COUNT(*) FROM " + TABLE_POSTS + " WHERE " + COL_AUTHOR + " = ? AND " + COL_RECEIVED_AT + " >= ?",
-                    arrayOf(post.authorNodeId, since.toString())
-                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-                if (count >= MAX_POSTS_PER_MINUTE) {
-                    db.setTransactionSuccessful()
-                    return InsertResult.RATE_LIMITED
-                }
-
+                // Record the immutable signed ID before applying author quotas. A rate-limited
+                // post is discarded consistently on retransmission instead of being re-verified.
                 val seenValues = ContentValues().apply {
                     put(COL_POST_ID, post.postId)
                     put(COL_SEEN_AT, now)
@@ -94,6 +86,17 @@ internal class WorldChatStore(context: Context) :
                 if (db.insertWithOnConflict(TABLE_SEEN, null, seenValues, SQLiteDatabase.CONFLICT_IGNORE) == -1L) {
                     db.setTransactionSuccessful()
                     return InsertResult.DUPLICATE
+                }
+
+                val since = now - RATE_WINDOW_MS
+                val count = db.rawQuery(
+                    "SELECT COUNT(*) FROM " + TABLE_POSTS + " WHERE " + COL_AUTHOR + " = ? AND " + COL_RECEIVED_AT + " >= ?",
+                    arrayOf(post.authorNodeId, since.toString())
+                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+                if (count >= MAX_POSTS_PER_MINUTE) {
+                    pruneSeenIds(db)
+                    db.setTransactionSuccessful()
+                    return InsertResult.RATE_LIMITED
                 }
                 val values = ContentValues().apply {
                     put(COL_POST_ID, post.postId)
@@ -108,11 +111,7 @@ internal class WorldChatStore(context: Context) :
                         "SELECT rowid FROM " + TABLE_POSTS + " ORDER BY " + COL_CREATED_AT +
                         " DESC LIMIT -1 OFFSET " + MAX_POSTS + ")"
                 )
-                db.execSQL(
-                    "DELETE FROM " + TABLE_SEEN + " WHERE rowid IN (" +
-                        "SELECT rowid FROM " + TABLE_SEEN + " ORDER BY " + COL_SEEN_AT +
-                        " DESC LIMIT -1 OFFSET " + MAX_SEEN_IDS + ")"
-                )
+                pruneSeenIds(db)
                 db.setTransactionSuccessful()
                 InsertResult.INSERTED
             } finally {
@@ -155,6 +154,14 @@ internal class WorldChatStore(context: Context) :
     override fun onCreate(db: SQLiteDatabase) = createTables(db)
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = createTables(db)
+
+    private fun pruneSeenIds(db: SQLiteDatabase) {
+        db.execSQL(
+            "DELETE FROM " + TABLE_SEEN + " WHERE rowid IN (" +
+                "SELECT rowid FROM " + TABLE_SEEN + " ORDER BY " + COL_SEEN_AT +
+                " DESC LIMIT -1 OFFSET " + MAX_SEEN_IDS + ")"
+        )
+    }
 
     private fun createTables(db: SQLiteDatabase) {
         db.execSQL(
