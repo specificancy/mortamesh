@@ -2,6 +2,8 @@
 
 Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.6.0 / protocol v2**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, and an encrypted Private Vault. It has no sign-up, no central messaging server, and no wallet/crypto UI.
 
+The Android manifest includes `INTERNET` permission for the app's **local Wi-Fi Direct TCP sockets**. This allows directly connected phones to exchange data over their local link; it is not used to connect to a central messaging server.
+
 ## Implemented networking
 
 - **Wi-Fi Direct:** discovery plus a local TCP transport for direct peers. It is preferred for large media when a direct recipient route is available.
@@ -71,7 +73,7 @@ The recipient stores received bytes encrypted in its own Private Vault. Local va
 
 Requirements: Android Studio with Android SDK Platform 35, JDK 17, Kotlin 2.0.21, and Android Gradle Plugin 8.7.3. Dependencies are declared in `app/build.gradle.kts` (AndroidX Core 1.15.0, CameraX 1.4.2, Activity KTX 1.10.1).
 
-1. Open the repository root (the directory containing `settings.gradle.kts` and `app/`) in Android Studio. Use JDK 17, Android SDK Platform 35, Kotlin 2.0.21, Android Gradle Plugin 8.7.3, and Gradle 8.9. This repository snapshot does not include a Gradle wrapper or a checked-in GitHub Actions workflow; use an installed Gradle 8.9 or Android Studio's compatible Gradle installation.
+1. Open the repository root (the directory containing `settings.gradle.kts` and `app/`) in Android Studio. Use JDK 17, Android SDK Platform 35, Kotlin 2.0.21, Android Gradle Plugin 8.7.3, and Gradle 8.9. This repository does not include a Gradle wrapper, so use an installed Gradle 8.9 or Android Studio's compatible Gradle installation. The checked-in `.github/workflows/android-build.yml` workflow automatically runs `clean testDebugUnitTest assembleDebug` on pushes and pull requests to `main`, and uploads the debug APK when the build succeeds.
 2. Install on at least three physical Android phones for mesh tests; two phones only validate direct messaging.
 3. Grant Nearby devices/Bluetooth, Nearby Wi-Fi, Camera and (for video) Microphone permissions. Enable Wi-Fi and Bluetooth and keep Morta Mesh open on each device.
 4. Connect phone A to B and phone B to C through Nearby. Once each physical link has exchanged identities, A should eventually see C under **Reachable through Morta Mesh**. Open A↔C and send a text/photo.
