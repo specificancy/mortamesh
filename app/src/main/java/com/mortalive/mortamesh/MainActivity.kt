@@ -1998,16 +1998,17 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Message is too long. Keep it under 3 KB.", Toast.LENGTH_SHORT).show()
             return
         }
-        input.text.clear()
-        appendMessage(peerId, ChatMessage(text, true))
         if (!sendSecurePayload(peerId, text, asChatText = true)) {
             val message = if (chatSendRateLimited) {
-                "Sending paused to protect mesh delivery limits. Try again after the short rate-limit window."
+                "Sending paused to protect mesh delivery limits. Your message is still in the composer; retry after the short rate-limit window."
             } else {
-                "Secure identity/route is not ready yet. Keep both apps open and retry after the peer appears."
+                "Secure identity/route is not ready yet. Your message is still in the composer; retry after the peer appears."
             }
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
         }
+        input.text.clear()
+        appendMessage(peerId, ChatMessage(text, true))
     }
 
     private fun openChat(peerId: String) {
