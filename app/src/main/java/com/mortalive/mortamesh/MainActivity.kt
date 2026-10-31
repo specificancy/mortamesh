@@ -162,6 +162,8 @@ class MainActivity : Activity() {
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
+    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 60, maxGlobal = 120)
+    private val mediaStartIngressLimiter = IngressRateLimiter(maxPerPeer = 10, maxGlobal = 40)
     private val worldChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 120)
     private val incomingTextFragments = linkedMapOf<String, IncomingTextFragments>()
     private val transportIdentitySentAt = linkedMapOf<String, Long>()
@@ -1589,6 +1591,7 @@ class MainActivity : Activity() {
                 val transferId = parts[2]
                 if (runCatching { UUID.fromString(transferId).toString() }.getOrNull() != transferId) return true
                 val authenticatedSender = fromNodeId ?: return true
+                if (!mediaStartIngressLimiter.allow(authenticatedSender)) return true
                 if (privateVault.receivedTransfer(transferId, authenticatedSender) != null) {
                     sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|$transferId", strict = false)
                     return true
@@ -3121,18 +3124,26 @@ class MainActivity : Activity() {
                 }
             }
             text.startsWith(MESH_PACKET_PREFIX) -> meshProtocolExecutor.execute {
-                // Enforce a physical-neighbor budget before signature verification or decryption.
-                if (!meshIngressLimiter.allow(sourcePeerId)) return@execute
                 val parts = text.removePrefix(MESH_PACKET_PREFIX).split('|', limit = 2)
                 if (parts.size != 2) return@execute
                 val ttl = parts[0].toIntOrNull()?.takeIf { it in 0..MESH_ROUTE_TTL } ?: return@execute
                 val envelope = try { JSONObject(decodeWire(parts[1])) } catch (_: Exception) { return@execute }
+                val destination = envelope.optString("to")
+                val claimedSender = envelope.optString("from")
+                val directlyClaimedSender = synchronized(physicalNodeByTransport) {
+                    physicalNodeByTransport[sourcePeerId]
+                } == claimedSender
+                // Media is sent only over a direct authenticated link. Do not throttle its ordered
+                // chunks here; apply a strict ingress budget to relays and unknown neighbors instead.
+                if ((destination != localNodeId || !directlyClaimedSender) &&
+                    !meshIngressLimiter.allow(sourcePeerId)) return@execute
                 if (!meshSecurity.verifyRoutableEnvelope(envelope)) return@execute
                 val messageId = envelope.optString("id")
-                val destination = envelope.optString("to")
                 val opened = if (destination == localNodeId) {
                     // A failed pin check or AEAD tag must never consume a durable replay ID.
                     val decrypted = meshSecurity.open(envelope) ?: return@execute
+                    if (!decrypted.text.startsWith(MEDIA_WIRE_PREFIX) &&
+                        !authenticatedChatIngressLimiter.allow(decrypted.fromNodeId)) return@execute
                     if (!replayGuard.acceptIfNew(messageId)) return@execute
                     decrypted
                 } else {
