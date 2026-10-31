@@ -119,8 +119,8 @@ internal class ReplayGuard(context: Context) :
         private const val RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val RATE_WINDOW_MS = 60_000L
         private const val MAX_ACCEPTED_PER_MINUTE = 60
-        // 60/min over a rolling seven-day window, including fixed-window boundary headroom.
-        // Keep capacity above 604,860 and never evict any still-live replay ID.
-        private const val MAX_ENTRIES = 650_000
+        // 60/min over seven days plus up to 50,000 IDs retained by the previous schema.
+        // Keep migration headroom and never evict any still-live replay ID.
+        private const val MAX_ENTRIES = 700_000
     }
 }
