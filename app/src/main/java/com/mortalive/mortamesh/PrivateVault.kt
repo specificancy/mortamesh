@@ -568,6 +568,21 @@ class PrivateVault(private val context: Context) {
         }
     }
 
+    private fun indexFingerprint(file: File): String? = try {
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(8 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        Base64.encodeToString(digest.digest(), Base64.NO_WRAP)
+    } catch (_: Exception) {
+        null
+    }
+
     /** Persist directory-entry changes as well as the file contents before reporting commit. */
     private fun syncVaultDirectory() {
         val directoryFd = Os.open(vaultDir.absolutePath, OsConstants.O_RDONLY, 0)
@@ -594,9 +609,17 @@ class PrivateVault(private val context: Context) {
         if (!indexFile.isFile) {
             // Retry the most recently quarantined snapshot first. It may have been moved aside
             // after a transient Keystore/provider error; validating it again is safe and read-only.
-            val archivedIndex = vaultDir.listFiles()?.filter {
+            val archives = vaultDir.listFiles()?.filter {
                 it.isFile && it.name.startsWith("vault_index.enc.unreadable-")
-            }?.maxByOrNull { it.lastModified() }
+            }.orEmpty()
+            val attemptedFingerprints = pinPrefs.getStringSet(ARCHIVE_RETRY_ATTEMPTS_KEY, emptySet()).orEmpty()
+            val untriedArchives = archives.filter { archive ->
+                val fingerprint = indexFingerprint(archive)
+                fingerprint == null || fingerprint !in attemptedFingerprints
+            }
+            // Prefer a different preserved snapshot after a failed attempt. If there is only one
+            // candidate, try it again so a transient Keystore/provider failure remains recoverable.
+            val archivedIndex = (untriedArchives.ifEmpty { archives }).maxByOrNull { it.lastModified() }
             if (archivedIndex != null) {
                 try {
                     Os.rename(archivedIndex.absolutePath, indexFile.absolutePath)
@@ -645,6 +668,7 @@ class PrivateVault(private val context: Context) {
                     if (item.id.isNotBlank() && File(vaultDir, "${item.id}.mmv").isFile) items[item.id] = item
                 }
             }
+            pinPrefs.edit().remove(ARCHIVE_RETRY_ATTEMPTS_KEY).apply()
             indexLoadedOk = true
         } catch (e: Exception) {
             items.clear()
@@ -657,6 +681,11 @@ class PrivateVault(private val context: Context) {
             }
             // Preserve a corrupt/unreadable index for diagnosis instead of silently overwriting it.
             if (indexFile.exists()) {
+                indexFingerprint(indexFile)?.let { fingerprint ->
+                    val attempted = pinPrefs.getStringSet(ARCHIVE_RETRY_ATTEMPTS_KEY, emptySet()).orEmpty().toMutableSet()
+                    attempted.add(fingerprint)
+                    pinPrefs.edit().putStringSet(ARCHIVE_RETRY_ATTEMPTS_KEY, attempted).commit()
+                }
                 val unreadable = File(vaultDir, "vault_index.enc.unreadable-" + System.currentTimeMillis())
                 val preserved = try {
                     Os.rename(indexFile.absolutePath, unreadable.absolutePath)
@@ -690,6 +719,7 @@ class PrivateVault(private val context: Context) {
         private const val MAX_RECEIVED_MEDIA_PER_SENDER_BYTES = 4L * 1024L * 1024L * 1024L
         private const val MIN_FREE_BYTES = 64L * 1024L * 1024L
         private const val ORPHAN_MIN_AGE_MS = 60L * 60L * 1000L
+        private const val ARCHIVE_RETRY_ATTEMPTS_KEY = "vault_index_archive_retry_attempts"
         private const val KEY_ALIAS = "morta_mesh_private_media_key_v1"
         private const val IV_BYTES = 12
         private const val GCM_TAG_BITS = 128
