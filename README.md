@@ -65,6 +65,7 @@ The recipient stores received bytes encrypted in its own Private Vault. Local va
 - A recipient's local media copy is encrypted with that recipient device's own vault key.
 - Incoming media is limited to four active sessions globally and two per authenticated sender, with a 120-second idle timeout and a 30-minute absolute timeout. The vault reserves remaining disk space across all active incoming writes, preserves a free-space floor, limits received media to 8 GiB total / 4 GiB per sender, and does not silently delete existing vault items to enforce those quotas.
 - Encrypted media bytes are finalized and synced before the vault index is committed and a delivery receipt is sent. The encrypted index is atomically replaced and the containing directory is synced.
+- If index metadata is missing or unreadable while encrypted files exist, the vault enters a read-only unavailable state instead of creating an empty replacement index. Retry rechecks the preserved or quarantined snapshot; orphaned encrypted files are not automatically removed while an unreadable index archive exists.
 
 ## Build
 
