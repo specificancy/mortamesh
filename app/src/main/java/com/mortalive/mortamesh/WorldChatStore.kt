@@ -49,7 +49,7 @@ internal data class WorldChatPost(
 
 /**
  * Bounded store for intentionally public mesh posts and durable de-duplication IDs.
- * Posts stay in the app-private database for seven days / 1,000 items; up to 220,000
+ * Posts stay in the app-private database for seven days / 1,000 items; up to 275,000
  * distinct signed post IDs are retained for seven days without evicting still-live IDs.
  */
 internal class WorldChatStore(context: Context) :
@@ -222,6 +222,7 @@ internal class WorldChatStore(context: Context) :
         private const val MAX_WORLD_POSTS_PER_MINUTE = 20
         const val MAX_POSTS = 1_000
         const val SYNC_POSTS = 5
-        private const val MAX_SEEN_IDS = 220_000
+        // Allows 20/min for seven days plus 50,000 pre-upgrade legacy IDs.
+        private const val MAX_SEEN_IDS = 275_000
     }
 }
