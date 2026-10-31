@@ -58,6 +58,6 @@ class IngressRateLimiterTest {
         assertTrue(limiter.allow("peer-a", 110L))
         assertTrue(limiter.allow("peer-b", 111L))
         assertTrue(limiter.allow("peer-c", 112L))
-        assertTrue(limiter.allow("peer-b", 113L))
+        assertFalse(limiter.allow("peer-b", 113L))
     }
 }
