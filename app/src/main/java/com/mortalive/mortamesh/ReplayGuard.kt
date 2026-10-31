@@ -21,16 +21,22 @@ internal class ReplayGuard(context: Context) :
             val db = writableDatabase
             db.beginTransaction()
             try {
+                // Expire only entries that are outside the signed-envelope replay window. Never
+                // evict a still-live ID to make room: doing so would make an old valid envelope
+                // replayable after an attacker fills the table.
                 db.delete(TABLE, "$COL_SEEN_AT < ?", arrayOf((now - RETENTION_MS).toString()))
+                val count = db.rawQuery("SELECT COUNT(*) FROM $TABLE", null).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getInt(0) else MAX_ENTRIES
+                }
+                if (count >= MAX_ENTRIES) {
+                    db.setTransactionSuccessful()
+                    return false
+                }
                 val values = ContentValues().apply {
                     put(COL_MESSAGE_ID, messageId)
                     put(COL_SEEN_AT, now)
                 }
                 val inserted = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
-                db.execSQL(
-                    "DELETE FROM $TABLE WHERE rowid IN (" +
-                        "SELECT rowid FROM $TABLE ORDER BY $COL_SEEN_AT DESC LIMIT -1 OFFSET $MAX_ENTRIES)"
-                )
                 db.setTransactionSuccessful()
                 inserted
             } finally {
