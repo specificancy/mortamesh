@@ -7,8 +7,8 @@ import android.database.sqlite.SQLiteOpenHelper
 import java.util.UUID
 
 /**
- * Durable anti-replay ledger for signed envelope IDs. It stores only message UUIDs and receive times,
- * never message content. The signed timestamp in MeshSecurity is also enforced before acceptance.
+ * Durable anti-replay ledger for signed envelopes. It stores sender node IDs, message UUIDs and
+ * receive times, never message content. The signed timestamp in MeshSecurity is enforced before acceptance.
  */
 internal class ReplayGuard(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DATABASE_NAME, null, DATABASE_VERSION) {
