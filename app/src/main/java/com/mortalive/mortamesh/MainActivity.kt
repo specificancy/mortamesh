@@ -162,7 +162,7 @@ class MainActivity : Activity() {
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
-    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 60, maxGlobal = 120)
+    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 60)
     private val mediaStartIngressLimiter = IngressRateLimiter(maxPerPeer = 10, maxGlobal = 40)
     private val worldChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 120)
     private val incomingTextFragments = linkedMapOf<String, IncomingTextFragments>()
@@ -1619,10 +1619,11 @@ class MainActivity : Activity() {
                 }
                 // Limit both global concurrency and per-identity slot use; a single neighbor
                 // cannot hold every receiver slot open.
-                if (existing == null && incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
+                // Repeated start frames for an already active transfer are harmless retries;
+                // do not abort and recreate the receiver's partial file.
+                if (existing != null) return true
+                if (incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
                 if (sessionsFromSender >= MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER) return true
-                existing?.writer?.abort()
-                incomingMedia.remove(key)
                 val writer = privateVault.beginIncoming(
                     transferId, fileName, mime, size, nameFor(peerId), authenticatedSender
                 )
@@ -1637,7 +1638,8 @@ class MainActivity : Activity() {
                 val key = "$peerId|${parts[2]}"
                 val session = incomingMedia[key] ?: return true
                 if (session.senderNodeId != fromNodeId) return true
-                val index = parts[3].toIntOrNull() ?: return true
+                val index = parts[3].toIntOrNull()?.takeIf { it >= 0 } ?: return true
+                if (index < session.nextChunk) return true // duplicate/replayed chunk already committed
                 if (index != session.nextChunk) {
                     session.writer.abort()
                     incomingMedia.remove(key)
@@ -3142,10 +3144,15 @@ class MainActivity : Activity() {
                 val opened = if (destination == localNodeId) {
                     // A failed pin check or AEAD tag must never consume a durable replay ID.
                     val decrypted = meshSecurity.open(envelope) ?: return@execute
-                    if (!decrypted.text.startsWith(MEDIA_WIRE_PREFIX) &&
-                        !authenticatedChatIngressLimiter.allow(decrypted.fromNodeId)) return@execute
-                    if (!replayGuard.acceptIfNew(messageId)) return@execute
-                    decrypted
+                    if (decrypted.text.startsWith(MEDIA_WIRE_PREFIX)) {
+                        // Media frames have their own authenticated transfer ID, exact chunk index,
+                        // session timeout and storage quotas. Keep bulk chunks out of the chat replay DB.
+                        decrypted
+                    } else {
+                        if (!authenticatedChatIngressLimiter.allow(decrypted.fromNodeId)) return@execute
+                        if (!replayGuard.acceptIfNew(messageId)) return@execute
+                        decrypted
+                    }
                 } else {
                     // Relays cannot decrypt; use only a bounded in-memory forwarding cache so
                     // unpinned, merely well-signed traffic cannot evict recipient replay history.
