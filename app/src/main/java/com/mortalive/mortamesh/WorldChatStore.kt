@@ -68,9 +68,13 @@ internal class WorldChatStore(context: Context) :
                 db.delete(TABLE_SEEN, COL_SEEN_AT + " < ?", arrayOf((now - RETENTION_MS).toString()))
                 db.delete(TABLE_POSTS, COL_RECEIVED_AT + " < ?", arrayOf((now - RETENTION_MS).toString()))
 
+                // New dedupe keys include the signed author's node ID. Treat pre-upgrade
+                // raw UUID rows as legacy global entries until their seven-day expiry.
+                val postKey = post.authorNodeId + "|" + post.postId
                 val already = db.query(
-                    TABLE_SEEN, arrayOf(COL_POST_ID), COL_POST_ID + " = ?",
-                    arrayOf(post.postId), null, null, null, "1"
+                    TABLE_SEEN, arrayOf(COL_POST_ID),
+                    COL_POST_ID + " = ? OR " + COL_POST_ID + " = ?",
+                    arrayOf(postKey, post.postId), null, null, null, "1"
                 ).use { it.moveToFirst() }
                 if (already) {
                     db.setTransactionSuccessful()
@@ -102,7 +106,7 @@ internal class WorldChatStore(context: Context) :
                 // Record the immutable signed ID before applying author quotas. A rate-limited
                 // post is discarded consistently on retransmission instead of being re-verified.
                 val seenValues = ContentValues().apply {
-                    put(COL_POST_ID, post.postId)
+                    put(COL_POST_ID, postKey)
                     put(COL_SEEN_AT, now)
                 }
                 if (db.insertWithOnConflict(TABLE_SEEN, null, seenValues, SQLiteDatabase.CONFLICT_IGNORE) == -1L) {
@@ -119,7 +123,9 @@ internal class WorldChatStore(context: Context) :
                     return InsertResult.RATE_LIMITED
                 }
                 val values = ContentValues().apply {
-                    put(COL_POST_ID, post.postId)
+                    // TABLE_POSTS has a single-column primary key. Store the same scoped key so
+                    // two different authors cannot collide on a caller-chosen UUID.
+                    put(COL_POST_ID, postKey)
                     put(COL_AUTHOR, post.authorNodeId)
                     put(COL_CREATED_AT, post.timestamp)
                     put(COL_RECEIVED_AT, now)
