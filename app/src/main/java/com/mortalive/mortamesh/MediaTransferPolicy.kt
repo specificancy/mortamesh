@@ -14,6 +14,12 @@ internal object MediaTransferPolicy {
 
     fun normalizeMime(mimeType: String): String = mimeType.trim().lowercase(java.util.Locale.ROOT)
 
+    /** An ACK is valid only for the exact stable logical recipient saved with the transfer. */
+    fun isAcknowledgementFromRecipient(recipientId: String?, authenticatedSenderNodeId: String): Boolean {
+        val canonicalNodeId = runCatching { java.util.UUID.fromString(authenticatedSenderNodeId).toString() }.getOrNull()
+        return canonicalNodeId == authenticatedSenderNodeId && recipientId == "mesh:$authenticatedSenderNodeId"
+    }
+
     fun isAcceptedMime(mimeType: String): Boolean = normalizeMime(mimeType) in ACCEPTED_MIME_TYPES
 
     /** True when a frame of this media type may arrive over the given kind of link. */
