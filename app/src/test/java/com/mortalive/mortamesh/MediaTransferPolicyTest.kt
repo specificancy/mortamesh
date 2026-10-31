@@ -60,6 +60,16 @@ class IngressRateLimiterTest {
         assertTrue(limiter.allow("peer-c", 112L))
         assertFalse(limiter.allow("peer-b", 113L))
     }
+
+    @Test fun batchReservationIsAtomicAndFairAcrossPeers() {
+        val limiter = IngressRateLimiter(maxPerPeer = 3, maxGlobal = 5, windowMs = 1_000L)
+        assertTrue(limiter.allowBatch("peer-a", 2, 10L))
+        assertFalse(limiter.allowBatch("peer-a", 2, 11L))
+        // A rejected batch must not consume a partial reservation.
+        assertTrue(limiter.allowBatch("peer-a", 1, 12L))
+        assertTrue(limiter.allowBatch("peer-b", 2, 13L))
+        assertFalse(limiter.allowBatch("peer-c", 1, 14L))
+    }
 }
 
 
