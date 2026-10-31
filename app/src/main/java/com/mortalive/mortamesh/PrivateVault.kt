@@ -585,6 +585,22 @@ class PrivateVault(private val context: Context) {
             }
         }
         if (!indexFile.isFile) {
+            // Retry the most recently quarantined snapshot first. It may have been moved aside
+            // after a transient Keystore/provider error; validating it again is safe and read-only.
+            val archivedIndex = vaultDir.listFiles()?.filter {
+                it.isFile && it.name.startsWith("vault_index.enc.unreadable-")
+            }?.maxByOrNull { it.lastModified() }
+            if (archivedIndex != null) {
+                try {
+                    Os.rename(archivedIndex.absolutePath, indexFile.absolutePath)
+                    syncVaultDirectory()
+                } catch (_: Exception) {
+                    indexUnavailable = true
+                    return
+                }
+            }
+        }
+        if (!indexFile.isFile) {
             val hasEncryptedMedia = vaultDir.listFiles()?.any { it.isFile && it.name.endsWith(".mmv") } == true
             val hasPendingIndex = indexTempFile.isFile
             val hasUnreadableIndex = vaultDir.listFiles()?.any {
