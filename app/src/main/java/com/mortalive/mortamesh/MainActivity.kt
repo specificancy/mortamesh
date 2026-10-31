@@ -123,7 +123,9 @@ class MainActivity : Activity() {
         var nextChunk: Int = 0,
         var lastActivityAt: Long = System.currentTimeMillis()
     )
-    private val incomingMedia = linkedMapOf<String, IncomingMediaSession>()
+    private val incomingMedia = java.util.concurrent.ConcurrentHashMap<String, IncomingMediaSession>()
+    private val incomingMediaLifecycleLock = Any()
+    @Volatile private var mediaReceiveClosing = false
     private val activeMediaTransfers: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val mediaAckWaiters = java.util.concurrent.ConcurrentHashMap<String, CountDownLatch>()
     private var openingVaultPreview = false
@@ -378,12 +380,11 @@ class MainActivity : Activity() {
         clientGatts.values.toList().forEach { try { it.disconnect(); it.close() } catch (_: Exception) { } }
         clientGatts.clear()
         try { wifiServerSocket?.close() } catch (_: Exception) { }
+        synchronized(incomingMediaLifecycleLock) { mediaReceiveClosing = true }
         mediaReceiveExecutor.shutdownNow()
         meshProtocolExecutor.shutdownNow()
-        synchronized(incomingMedia) {
-            incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
-            incomingMedia.clear()
-        }
+        incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
+        incomingMedia.clear()
         try {
             val channel = wifiP2pChannel
             if (hasWifiDirectRuntimePermission() && channel != null) wifiP2pManager?.removeGroup(channel, null)
@@ -1568,26 +1569,19 @@ class MainActivity : Activity() {
     } catch (_: Exception) { "" }
 
     private fun reapExpiredIncomingMedia() {
-        synchronized(incomingMedia) {
-            val now = System.currentTimeMillis()
-            val expired = incomingMedia.filterValues {
-                now - it.lastActivityAt > INCOMING_MEDIA_IDLE_TIMEOUT_MS ||
-                    now - it.startedAt > INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS
-            }.keys.toList()
-            expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
-        }
+        val now = System.currentTimeMillis()
+        val expired = incomingMedia.filterValues {
+            now - it.lastActivityAt > INCOMING_MEDIA_IDLE_TIMEOUT_MS ||
+                now - it.startedAt > INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS
+        }.keys.toList()
+        expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
     }
 
     /** Returns true for a consumed private-media control frame so it never appears as chat text. */
     private fun handleIncomingMediaWireText(
         peerId: String, text: String, sourceTransportId: String? = null, fromNodeId: String? = null
-    ): Boolean = synchronized(incomingMedia) {
-        handleIncomingMediaWireTextLocked(peerId, text, sourceTransportId, fromNodeId)
-    }
-
-    private fun handleIncomingMediaWireTextLocked(
-        peerId: String, text: String, sourceTransportId: String? = null, fromNodeId: String? = null
     ): Boolean {
+        if (mediaReceiveClosing) return true
         if (!text.startsWith(MEDIA_WIRE_PREFIX)) return false
         reapExpiredIncomingMedia()
         val parts = text.split("|")
@@ -1644,7 +1638,17 @@ class MainActivity : Activity() {
                     runOnUiThread { Toast.makeText(this, "Could not create an encrypted incoming file or the vault storage quota is full.", Toast.LENGTH_LONG).show() }
                     return true
                 }
-                incomingMedia[key] = IncomingMediaSession(writer, authenticatedSender, size)
+                val session = IncomingMediaSession(writer, authenticatedSender, size)
+                val registered = synchronized(incomingMediaLifecycleLock) {
+                    if (mediaReceiveClosing) false else {
+                        incomingMedia[key] = session
+                        true
+                    }
+                }
+                if (!registered) {
+                    incomingMedia.remove(key, session)
+                    writer.abort()
+                }
             }
             "C" -> {
                 if (parts.size < 5) return true
