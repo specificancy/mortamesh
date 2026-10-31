@@ -77,6 +77,7 @@ class PrivateVault(private val context: Context) {
             return try {
                 cipherOutput.write(bytes)
                 writtenBytes += bytes.size
+                updateIncomingReservation(itemId, (expectedBytes - writtenBytes).coerceAtLeast(0L))
                 true
             } catch (_: Exception) {
                 abort()
@@ -145,7 +146,7 @@ class PrivateVault(private val context: Context) {
     private val indexTempFile = File(vaultDir, "vault_index.enc.tmp")
     private val pinPrefs = context.getSharedPreferences("morta_vault_pin", Context.MODE_PRIVATE)
     private val items = linkedMapOf<String, Item>()
-    private data class IncomingReservation(val bytes: Long, val senderNodeId: String)
+    private data class IncomingReservation(val expectedBytes: Long, var remainingBytes: Long, val senderNodeId: String)
     private val incomingReservations = linkedMapOf<String, IncomingReservation>()
     // Set when the index could not be read for a possibly transient reason (e.g. Keystore). While
     // set, nothing is written, so a good index is never replaced by an empty one.
@@ -319,8 +320,9 @@ class PrivateVault(private val context: Context) {
         source: File, originalName: String, mimeType: String, direction: String, peerName: String,
         recipientId: String? = null, chatPeerId: String? = null, transferId: String? = null, transferState: String = ""
     ): Item? {
+        val reservedRemaining = incomingReservations.values.sumOf { it.remainingBytes }
         if (indexUnavailable || !source.isFile || source.length() !in 1L..MAX_MEDIA_BYTES ||
-            vaultDir.usableSpace < source.length() + MIN_FREE_BYTES) return null
+            vaultDir.usableSpace - reservedRemaining < source.length() + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
         return try {
@@ -349,7 +351,7 @@ class PrivateVault(private val context: Context) {
             runCatching { java.util.UUID.fromString(senderNodeId).toString() }.getOrNull() != senderNodeId) return null
         if (!canStoreReceivedLocked(expectedBytes, senderNodeId)) return null
         // Reserve the announced plaintext size across all active sessions before opening a file.
-        val reservedBytes = incomingReservations.values.sumOf { it.bytes }
+        val reservedBytes = incomingReservations.values.sumOf { it.remainingBytes }
         if (vaultDir.usableSpace - reservedBytes < expectedBytes + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
@@ -364,7 +366,7 @@ class PrivateVault(private val context: Context) {
             check(iv.size == IV_BYTES) { "Unexpected GCM IV size" }
             output.write(MAGIC)
             output.write(iv)
-            incomingReservations[id] = IncomingReservation(expectedBytes, senderNodeId)
+            incomingReservations[id] = IncomingReservation(expectedBytes, expectedBytes, senderNodeId)
             IncomingWrite(
                 transferId, id, safeFileName(originalName, mimeType), mimeType, expectedBytes,
                 peerName, destination, output, CipherOutputStream(NonClosingOutputStream(output), cipher), senderNodeId
@@ -382,6 +384,11 @@ class PrivateVault(private val context: Context) {
         incomingReservations.remove(itemId)
     }
 
+    @Synchronized
+    private fun updateIncomingReservation(itemId: String, remainingBytes: Long) {
+        incomingReservations[itemId]?.remainingBytes = remainingBytes
+    }
+
     /** Enforce stored and in-flight inbound quotas without silently deleting existing vault items. */
     private fun canStoreReceivedLocked(bytes: Long, senderNodeId: String, excludingReservationId: String? = null): Boolean {
         if (bytes <= 0L || bytes > MAX_MEDIA_BYTES) return false
@@ -390,8 +397,8 @@ class PrivateVault(private val context: Context) {
             it.direction == "Received" && it.senderNodeId == senderNodeId
         }.sumOf { it.size }
         val reserved = incomingReservations.entries.filter { it.key != excludingReservationId }
-        val reservedTotal = reserved.sumOf { it.value.bytes }
-        val reservedFromSender = reserved.filter { it.value.senderNodeId == senderNodeId }.sumOf { it.value.bytes }
+        val reservedTotal = reserved.sumOf { it.value.expectedBytes }
+        val reservedFromSender = reserved.filter { it.value.senderNodeId == senderNodeId }.sumOf { it.value.expectedBytes }
         return storedTotal <= MAX_RECEIVED_MEDIA_BYTES - reservedTotal - bytes &&
             storedFromSender <= MAX_RECEIVED_MEDIA_PER_SENDER_BYTES - reservedFromSender - bytes
     }
