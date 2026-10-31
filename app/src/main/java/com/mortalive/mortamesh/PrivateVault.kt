@@ -23,6 +23,7 @@ import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.system.Os
+import android.system.OsConstants
 
 private class NonClosingOutputStream(private val delegate: OutputStream) : OutputStream() {
     override fun write(value: Int) = delegate.write(value)
@@ -545,11 +546,22 @@ class PrivateVault(private val context: Context) {
             }
             // The index update is atomic: never replace a good index with a partial write.
             Os.rename(indexTempFile.absolutePath, indexFile.absolutePath)
+            syncVaultDirectory()
             indexLoadedOk = true
             true
         } catch (_: Exception) {
             try { indexTempFile.delete() } catch (_: Exception) { }
             false
+        }
+    }
+
+    /** Persist directory-entry changes as well as the file contents before reporting commit. */
+    private fun syncVaultDirectory() {
+        val directoryFd = Os.open(vaultDir.absolutePath, OsConstants.O_RDONLY, 0)
+        try {
+            Os.fsync(directoryFd)
+        } finally {
+            Os.close(directoryFd)
         }
     }
 
