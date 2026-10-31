@@ -80,6 +80,8 @@ internal class ReplayGuard(context: Context) :
         private const val COL_MESSAGE_ID = "message_id"
         private const val COL_SEEN_AT = "seen_at"
         private const val RETENTION_MS = 7L * 24 * 60 * 60 * 1000
-        private const val MAX_ENTRIES = 50_000
+        // A 60/min global accepted-chat cap yields at most 604,800 IDs in seven days.
+        // Keep headroom without evicting any still-live replay ID.
+        private const val MAX_ENTRIES = 650_000
     }
 }
