@@ -113,6 +113,16 @@ class PrivateVault(private val context: Context) {
             val item = Item(itemId, fileName, mimeType, writtenBytes, System.currentTimeMillis(), "Received", peerName,
                 transferId = transferId, transferState = "RECEIVED", senderNodeId = senderNodeId)
             synchronized(this@PrivateVault) {
+                // A transport reconnect may create a second receive session for the same logical
+                // sender/transfer. The first completed copy wins; ACK the retry without storing
+                // another encrypted item or charging the sender's storage quota twice.
+                items.values.firstOrNull {
+                    it.direction == "Received" && it.transferId == transferId && it.senderNodeId == senderNodeId
+                }?.let { existing ->
+                    destination.delete()
+                    releaseIncomingReservation(itemId)
+                    return existing
+                }
                 if (!canStoreReceivedLocked(writtenBytes, senderNodeId, itemId)) {
                     destination.delete()
                     releaseIncomingReservation(itemId)
@@ -149,6 +159,8 @@ class PrivateVault(private val context: Context) {
     private val items = linkedMapOf<String, Item>()
     private data class IncomingReservation(val expectedBytes: Long, var remainingBytes: Long, val senderNodeId: String)
     private val incomingReservations = linkedMapOf<String, IncomingReservation>()
+    // Outbound encryption happens without holding the vault monitor; reserve its disk budget first.
+    private val outgoingReservations = linkedMapOf<String, Long>()
     // Set when the index is unreadable, missing while encrypted data exists, or may be affected
     // by a transient Keystore/storage error. While set, writes are blocked to preserve recoverable data.
     @Volatile private var indexUnavailable = false
@@ -323,30 +335,52 @@ class PrivateVault(private val context: Context) {
         return true
     }
 
-    @Synchronized fun saveFromFile(
+    fun saveFromFile(
         source: File, originalName: String, mimeType: String, direction: String, peerName: String,
         recipientId: String? = null, chatPeerId: String? = null, transferId: String? = null, transferState: String = ""
     ): Item? {
-        val reservedRemaining = incomingReservations.values.sumOf { it.remainingBytes }
-        if (indexUnavailable || !source.isFile || source.length() !in 1L..MAX_MEDIA_BYTES ||
-            vaultDir.usableSpace - reservedRemaining < source.length() + MIN_FREE_BYTES) return null
+        val length = source.length()
+        if (length !in 1L..MAX_MEDIA_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
+
+        // Keep only admission/reservation state under the monitor. Encryption is large-file I/O
+        // and must not block the Vault screen, incoming completion, or delivery receipts.
+        val admitted = synchronized(this) {
+            val reservedIncoming = incomingReservations.values.sumOf { it.remainingBytes }
+            val reservedOutgoing = outgoingReservations.values.sum()
+            val fits = !indexUnavailable && source.isFile &&
+                vaultDir.usableSpace - reservedIncoming - reservedOutgoing >= length + MIN_FREE_BYTES
+            if (fits) outgoingReservations[id] = length
+            fits
+        }
+        if (!admitted) return null
+
         return try {
             encryptFile(source, destination)
             val item = Item(
-                id, safeFileName(originalName, mimeType), mimeType, source.length(),
+                id, safeFileName(originalName, mimeType), mimeType, length,
                 System.currentTimeMillis(), direction, peerName, recipientId, chatPeerId, transferId, transferState
             )
-            items[id] = item
-            if (!saveIndex()) {
-                items.remove(id)
-                destination.delete()
-                null
-            } else item
+            synchronized(this) {
+                outgoingReservations.remove(id)
+                if (indexUnavailable) {
+                    destination.delete()
+                    null
+                } else {
+                    items[id] = item
+                    if (!saveIndex()) {
+                        items.remove(id)
+                        destination.delete()
+                        null
+                    } else item
+                }
+            }
         } catch (_: Exception) {
             destination.delete()
             null
+        } finally {
+            synchronized(this) { outgoingReservations.remove(id) }
         }
     }
 
@@ -358,8 +392,9 @@ class PrivateVault(private val context: Context) {
             runCatching { java.util.UUID.fromString(senderNodeId).toString() }.getOrNull() != senderNodeId) return null
         if (!canStoreReceivedLocked(expectedBytes, senderNodeId)) return null
         // Reserve the announced plaintext size across all active sessions before opening a file.
-        val reservedBytes = incomingReservations.values.sumOf { it.remainingBytes }
-        if (vaultDir.usableSpace - reservedBytes < expectedBytes + MIN_FREE_BYTES) return null
+        val reservedIncoming = incomingReservations.values.sumOf { it.remainingBytes }
+        val reservedOutgoing = outgoingReservations.values.sum()
+        if (vaultDir.usableSpace - reservedIncoming - reservedOutgoing < expectedBytes + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
         var raw: FileOutputStream? = null
@@ -411,7 +446,7 @@ class PrivateVault(private val context: Context) {
     }
 
     /** Opens an authenticated decryption stream for sending without creating a plaintext disk copy. */
-    @Synchronized fun openDecryptedInput(item: Item): InputStream? {
+    fun openDecryptedInput(item: Item): InputStream? {
         val file = File(vaultDir, "${item.id}.mmv")
         if (!file.isFile) return null
         val raw = try { FileInputStream(file) } catch (_: Exception) { return null }
@@ -423,7 +458,7 @@ class PrivateVault(private val context: Context) {
         }
     }
 
-    @Synchronized fun readDecrypted(item: Item): ByteArray? {
+    fun readDecrypted(item: Item): ByteArray? {
         val file = File(vaultDir, "${item.id}.mmv")
         if (!file.isFile || item.size > MAX_IMAGE_READ_BYTES) return null
         return try {
@@ -446,7 +481,7 @@ class PrivateVault(private val context: Context) {
         } catch (_: Exception) { null }
     }
 
-    @Synchronized fun decryptToTemp(item: Item, destination: File): Boolean {
+    fun decryptToTemp(item: Item, destination: File): Boolean {
         val encrypted = File(vaultDir, "${item.id}.mmv")
         if (!encrypted.isFile) return false
         return try {
