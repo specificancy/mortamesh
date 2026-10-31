@@ -162,7 +162,7 @@ class MainActivity : Activity() {
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
-    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 60)
+    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 60, maxGlobal = 60)
     private val mediaStartIngressLimiter = IngressRateLimiter(maxPerPeer = 10, maxGlobal = 40)
     private val worldChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 120)
     private val incomingTextFragments = linkedMapOf<String, IncomingTextFragments>()
