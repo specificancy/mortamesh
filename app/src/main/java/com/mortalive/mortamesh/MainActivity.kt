@@ -917,7 +917,7 @@ class MainActivity : Activity() {
         if (privateVault.isUnavailable()) {
             val unavailable = card()
             unavailable.addView(label("Vault temporarily unavailable", 16f, ink, true))
-            unavailable.addView(label("Android's secure key storage could not be read. Your encrypted items have not been changed or deleted. Try again in a moment; if this keeps happening, restart the app.", 13f, muted).apply {
+            unavailable.addView(label("The secure key or vault index could not be read, or encrypted files exist without readable index metadata. Your encrypted files have not been changed or deleted. Retry after restarting; do not clear app data or uninstall while recovery is needed.", 13f, muted).apply {
                 setLineSpacing(dp(3).toFloat(), 1f)
                 setPadding(0, dp(10), 0, dp(14))
             })
