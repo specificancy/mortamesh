@@ -10,6 +10,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -22,6 +23,13 @@ import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.system.Os
+
+private class NonClosingOutputStream(private val delegate: OutputStream) : OutputStream() {
+    override fun write(value: Int) = delegate.write(value)
+    override fun write(bytes: ByteArray, offset: Int, length: Int) = delegate.write(bytes, offset, length)
+    override fun flush() = delegate.flush()
+    override fun close() = flush()
+}
 
 /**
  * App-private encrypted media storage. Files never enter MediaStore, Downloads, or shared storage.
@@ -40,7 +48,8 @@ class PrivateVault(private val context: Context) {
         val recipientId: String? = null,
         val chatPeerId: String? = null,
         val transferId: String? = null,
-        val transferState: String = ""
+        val transferState: String = "",
+        val senderNodeId: String? = null
     )
 
     inner class IncomingWrite internal constructor(
@@ -51,7 +60,9 @@ class PrivateVault(private val context: Context) {
         private val expectedBytes: Long,
         private val peerName: String,
         private val destination: File,
-        private val cipherOutput: CipherOutputStream
+        private val rawOutput: FileOutputStream,
+        private val cipherOutput: CipherOutputStream,
+        private val senderNodeId: String
     ) : Closeable {
         var writtenBytes: Long = 0L
             private set
@@ -76,20 +87,43 @@ class PrivateVault(private val context: Context) {
         @Synchronized fun finish(): Item? {
             if (finished) return null
             finished = true
-            try { cipherOutput.close() } catch (_: Exception) { destination.delete(); return null }
+            try {
+                // Finalize the GCM tag first, then force the encrypted bytes to stable storage
+                // before committing an index row or acknowledging delivery to the sender.
+                cipherOutput.close()
+                rawOutput.fd.sync()
+            } catch (_: Exception) {
+                destination.delete()
+                try { rawOutput.close() } catch (_: Exception) { }
+                releaseIncomingReservation(itemId)
+                return null
+            }
+            try { rawOutput.close() } catch (_: Exception) {
+                destination.delete()
+                releaseIncomingReservation(itemId)
+                return null
+            }
             if (writtenBytes != expectedBytes || writtenBytes <= 0L) {
                 destination.delete()
+                releaseIncomingReservation(itemId)
                 return null
             }
             val item = Item(itemId, fileName, mimeType, writtenBytes, System.currentTimeMillis(), "Received", peerName,
-                transferId = transferId, transferState = "RECEIVED")
+                transferId = transferId, transferState = "RECEIVED", senderNodeId = senderNodeId)
             synchronized(this@PrivateVault) {
+                if (!canStoreReceivedLocked(writtenBytes, senderNodeId, itemId)) {
+                    destination.delete()
+                    releaseIncomingReservation(itemId)
+                    return null
+                }
                 items[item.id] = item
                 if (!saveIndex()) {
                     items.remove(item.id)
                     destination.delete()
+                    releaseIncomingReservation(itemId)
                     return null
                 }
+                releaseIncomingReservation(itemId)
             }
             return item
         }
@@ -98,7 +132,9 @@ class PrivateVault(private val context: Context) {
             if (finished) return
             finished = true
             try { cipherOutput.close() } catch (_: Exception) { }
+            try { rawOutput.close() } catch (_: Exception) { }
             destination.delete()
+            releaseIncomingReservation(itemId)
         }
 
         override fun close() = abort()
@@ -109,6 +145,8 @@ class PrivateVault(private val context: Context) {
     private val indexTempFile = File(vaultDir, "vault_index.enc.tmp")
     private val pinPrefs = context.getSharedPreferences("morta_vault_pin", Context.MODE_PRIVATE)
     private val items = linkedMapOf<String, Item>()
+    private data class IncomingReservation(val bytes: Long, val senderNodeId: String)
+    private val incomingReservations = linkedMapOf<String, IncomingReservation>()
     // Set when the index could not be read for a possibly transient reason (e.g. Keystore). While
     // set, nothing is written, so a good index is never replaced by an empty one.
     @Volatile private var indexUnavailable = false
@@ -199,8 +237,10 @@ class PrivateVault(private val context: Context) {
 
     @Synchronized fun transferById(transferId: String): Item? = items.values.firstOrNull { it.transferId == transferId }
 
-    @Synchronized fun receivedTransfer(transferId: String): Item? =
-        items.values.firstOrNull { it.direction == "Received" && it.transferId == transferId }
+    @Synchronized fun receivedTransfer(transferId: String, senderNodeId: String): Item? =
+        items.values.firstOrNull {
+            it.direction == "Received" && it.transferId == transferId && it.senderNodeId == senderNodeId
+        }
 
     @Synchronized fun updateTransferState(itemId: String, state: String): Item? {
         val current = items[itemId] ?: return null
@@ -215,8 +255,12 @@ class PrivateVault(private val context: Context) {
         return updated
     }
 
-    @Synchronized fun markTransferDelivered(transferId: String): Pair<Item, Boolean>? {
-        val current = items.values.firstOrNull { it.direction == "Sent" && it.transferId == transferId } ?: return null
+    @Synchronized fun markTransferDelivered(transferId: String, authenticatedSenderNodeId: String): Pair<Item, Boolean>? {
+        // The signed ACK must come from the exact logical recipient saved with this transfer.
+        val expectedRecipientId = "mesh:$authenticatedSenderNodeId"
+        val current = items.values.firstOrNull {
+            it.direction == "Sent" && it.transferId == transferId && it.recipientId == expectedRecipientId
+        } ?: return null
         if (current.transferState == "DELIVERED") return current to false
         val updated = current.copy(transferState = "DELIVERED")
         items[updated.id] = updated
@@ -275,7 +319,8 @@ class PrivateVault(private val context: Context) {
         source: File, originalName: String, mimeType: String, direction: String, peerName: String,
         recipientId: String? = null, chatPeerId: String? = null, transferId: String? = null, transferState: String = ""
     ): Item? {
-        if (!source.isFile || source.length() !in 1L..MAX_MEDIA_BYTES) return null
+        if (indexUnavailable || !source.isFile || source.length() !in 1L..MAX_MEDIA_BYTES ||
+            vaultDir.usableSpace < source.length() + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
         return try {
@@ -296,10 +341,16 @@ class PrivateVault(private val context: Context) {
         }
     }
 
-    @Synchronized fun beginIncoming(transferId: String, originalName: String, mimeType: String, expectedBytes: Long, peerName: String): IncomingWrite? {
-        if (expectedBytes !in 1L..MAX_MEDIA_BYTES) return null
-        // Refuse a transfer that cannot fit, instead of filling storage with a partial encrypted file.
-        if (vaultDir.usableSpace < expectedBytes + MIN_FREE_BYTES) return null
+    @Synchronized fun beginIncoming(
+        transferId: String, originalName: String, mimeType: String, expectedBytes: Long,
+        peerName: String, senderNodeId: String
+    ): IncomingWrite? {
+        if (indexUnavailable || expectedBytes !in 1L..MAX_MEDIA_BYTES ||
+            runCatching { java.util.UUID.fromString(senderNodeId).toString() }.getOrNull() != senderNodeId) return null
+        if (!canStoreReceivedLocked(expectedBytes, senderNodeId)) return null
+        // Reserve the announced plaintext size across all active sessions before opening a file.
+        val reservedBytes = incomingReservations.values.sumOf { it.bytes }
+        if (vaultDir.usableSpace - reservedBytes < expectedBytes + MIN_FREE_BYTES) return null
         val id = java.util.UUID.randomUUID().toString()
         val destination = File(vaultDir, "$id.mmv")
         var raw: FileOutputStream? = null
@@ -313,12 +364,36 @@ class PrivateVault(private val context: Context) {
             check(iv.size == IV_BYTES) { "Unexpected GCM IV size" }
             output.write(MAGIC)
             output.write(iv)
-            IncomingWrite(transferId, id, safeFileName(originalName, mimeType), mimeType, expectedBytes, peerName, destination, CipherOutputStream(output, cipher))
+            incomingReservations[id] = IncomingReservation(expectedBytes, senderNodeId)
+            IncomingWrite(
+                transferId, id, safeFileName(originalName, mimeType), mimeType, expectedBytes,
+                peerName, destination, output, CipherOutputStream(NonClosingOutputStream(output), cipher), senderNodeId
+            )
         } catch (_: Exception) {
             try { raw?.close() } catch (_: Exception) { }
             destination.delete()
+            incomingReservations.remove(id)
             null
         }
+    }
+
+    @Synchronized
+    private fun releaseIncomingReservation(itemId: String) {
+        incomingReservations.remove(itemId)
+    }
+
+    /** Enforce stored and in-flight inbound quotas without silently deleting existing vault items. */
+    private fun canStoreReceivedLocked(bytes: Long, senderNodeId: String, excludingReservationId: String? = null): Boolean {
+        if (bytes <= 0L || bytes > MAX_MEDIA_BYTES) return false
+        val storedTotal = items.values.filter { it.direction == "Received" }.sumOf { it.size }
+        val storedFromSender = items.values.filter {
+            it.direction == "Received" && it.senderNodeId == senderNodeId
+        }.sumOf { it.size }
+        val reserved = incomingReservations.entries.filter { it.key != excludingReservationId }
+        val reservedTotal = reserved.sumOf { it.value.bytes }
+        val reservedFromSender = reserved.filter { it.value.senderNodeId == senderNodeId }.sumOf { it.value.bytes }
+        return storedTotal <= MAX_RECEIVED_MEDIA_BYTES - reservedTotal - bytes &&
+            storedFromSender <= MAX_RECEIVED_MEDIA_PER_SENDER_BYTES - reservedFromSender - bytes
     }
 
     /** Opens an authenticated decryption stream for sending without creating a plaintext disk copy. */
@@ -390,8 +465,14 @@ class PrivateVault(private val context: Context) {
         FileOutputStream(destination).use { raw ->
             raw.write(MAGIC)
             raw.write(iv)
-            CipherOutputStream(raw, cipher).use { output ->
+            val output = CipherOutputStream(NonClosingOutputStream(raw), cipher)
+            try {
                 FileInputStream(source).use { input -> input.copyTo(output, 32 * 1024) }
+                output.close()
+                raw.fd.sync()
+            } catch (e: Exception) {
+                try { output.close() } catch (_: Exception) { }
+                throw e
             }
         }
     }
@@ -440,7 +521,8 @@ class PrivateVault(private val context: Context) {
                     .put("size", item.size).put("createdAt", item.createdAt)
                     .put("direction", item.direction).put("peerName", item.peerName)
                     .put("recipientId", item.recipientId ?: "").put("chatPeerId", item.chatPeerId ?: "")
-                    .put("transferId", item.transferId ?: "").put("transferState", item.transferState))
+                    .put("transferId", item.transferId ?: "").put("transferState", item.transferState)
+                    .put("senderNodeId", item.senderNodeId ?: ""))
             }
             val plain = array.toString().toByteArray(Charsets.UTF_8)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -482,7 +564,8 @@ class PrivateVault(private val context: Context) {
                         row.optString("recipientId").takeIf { it.isNotBlank() },
                         row.optString("chatPeerId").takeIf { it.isNotBlank() },
                         row.optString("transferId").takeIf { it.isNotBlank() },
-                        row.optString("transferState")
+                        row.optString("transferState"),
+                        row.optString("senderNodeId").takeIf { it.isNotBlank() }
                     )
                     if (item.id.isNotBlank() && File(vaultDir, "${item.id}.mmv").isFile) items[item.id] = item
                 }
@@ -517,6 +600,8 @@ class PrivateVault(private val context: Context) {
         // Media is streamed to encrypted files; preview decoding is separately downsampled.
         const val MAX_MEDIA_BYTES = 2L * 1024L * 1024L * 1024L
         const val MAX_IMAGE_READ_BYTES = 20L * 1024L * 1024L
+        private const val MAX_RECEIVED_MEDIA_BYTES = 8L * 1024L * 1024L * 1024L
+        private const val MAX_RECEIVED_MEDIA_PER_SENDER_BYTES = 4L * 1024L * 1024L * 1024L
         private const val MIN_FREE_BYTES = 64L * 1024L * 1024L
         private const val ORPHAN_MIN_AGE_MS = 60L * 60L * 1000L
         private const val KEY_ALIAS = "morta_mesh_private_media_key_v1"
