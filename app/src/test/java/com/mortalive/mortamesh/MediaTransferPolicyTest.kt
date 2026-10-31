@@ -39,3 +39,25 @@ class MediaTransferPolicyTest {
         assertFalse(MediaTransferPolicy.isTransportAllowed("VIDEO/MP4", viaWifiDirect = false))
     }
 }
+
+
+class IngressRateLimiterTest {
+    @Test fun enforcesPerPeerAndGlobalBudgets() {
+        val limiter = IngressRateLimiter(maxPerPeer = 2, maxGlobal = 3, windowMs = 1_000L)
+        assertTrue(limiter.allow("peer-a", 10L))
+        assertTrue(limiter.allow("peer-a", 11L))
+        assertFalse(limiter.allow("peer-a", 12L))
+        assertTrue(limiter.allow("peer-b", 13L))
+        assertFalse(limiter.allow("peer-c", 14L))
+    }
+
+    @Test fun resetsTheWindowAndBoundsTrackedPeers() {
+        val limiter = IngressRateLimiter(maxPerPeer = 1, maxGlobal = 10, windowMs = 100L, maxTrackedPeers = 2)
+        assertTrue(limiter.allow("peer-a", 10L))
+        assertFalse(limiter.allow("peer-a", 20L))
+        assertTrue(limiter.allow("peer-a", 110L))
+        assertTrue(limiter.allow("peer-b", 111L))
+        assertTrue(limiter.allow("peer-c", 112L))
+        assertTrue(limiter.allow("peer-b", 113L))
+    }
+}
