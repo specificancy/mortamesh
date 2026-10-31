@@ -61,3 +61,16 @@ class IngressRateLimiterTest {
         assertFalse(limiter.allow("peer-b", 113L))
     }
 }
+
+
+class MediaAcknowledgementPolicyTest {
+    @Test fun acceptsOnlyTheSavedLogicalRecipient() {
+        val recipient = "mesh:123e4567-e89b-42d3-a456-426614174000"
+        val sender = "123e4567-e89b-42d3-a456-426614174000"
+        assertTrue(MediaTransferPolicy.isAcknowledgementFromRecipient(recipient, sender))
+        assertFalse(MediaTransferPolicy.isAcknowledgementFromRecipient("mesh:123e4567-e89b-42d3-a456-426614174001", sender))
+        assertFalse(MediaTransferPolicy.isAcknowledgementFromRecipient("wifi:peer", sender))
+        assertFalse(MediaTransferPolicy.isAcknowledgementFromRecipient(null, sender))
+        assertFalse(MediaTransferPolicy.isAcknowledgementFromRecipient(recipient, "not-a-uuid"))
+    }
+}
