@@ -545,6 +545,7 @@ class PrivateVault(private val context: Context) {
             }
             // The index update is atomic: never replace a good index with a partial write.
             Os.rename(indexTempFile.absolutePath, indexFile.absolutePath)
+            indexLoadedOk = true
             true
         } catch (_: Exception) {
             try { indexTempFile.delete() } catch (_: Exception) { }
