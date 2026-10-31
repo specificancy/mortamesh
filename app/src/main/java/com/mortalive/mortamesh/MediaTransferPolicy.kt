@@ -31,7 +31,7 @@ internal object MediaTransferPolicy {
 
 /**
  * Bounds work caused by frames arriving through one physical neighbor and across the whole app.
- * Call this before parsing/cryptographic verification. The tracked-peer map is itself bounded.
+ * Call this before cryptographic verification. The tracked-peer map is itself bounded.
  */
 internal class IngressRateLimiter(
     private val maxPerPeer: Int,
