@@ -164,7 +164,9 @@ class MainActivity : Activity() {
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
-    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 60, maxGlobal = 60)
+    private val authenticatedChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 60)
+    private val outgoingChatSendLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 60)
+    @Volatile private var chatSendRateLimited = false
     private val mediaStartIngressLimiter = IngressRateLimiter(maxPerPeer = 10, maxGlobal = 40)
     private val worldChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 120)
     private val incomingTextFragments = linkedMapOf<String, IncomingTextFragments>()
@@ -1598,7 +1600,8 @@ class MainActivity : Activity() {
                 val transferId = parts[2]
                 if (runCatching { UUID.fromString(transferId).toString() }.getOrNull() != transferId) return true
                 val authenticatedSender = fromNodeId ?: return true
-                val key = "$peerId|$transferId"
+                // Bind sessions to the stable authenticated identity, not a transient radio address.
+                val key = "$authenticatedSender|$transferId"
                 // A completed or already-active transfer is an idempotent retry, not a new
                 // allocation. Let it finish/ACK without spending the new-session rate budget.
                 if (privateVault.receivedTransfer(transferId, authenticatedSender) != null) {
@@ -1653,9 +1656,10 @@ class MainActivity : Activity() {
             }
             "C" -> {
                 if (parts.size < 5) return true
-                val key = "$peerId|${parts[2]}"
+                val sender = fromNodeId ?: return true
+                val key = "$sender|${parts[2]}"
                 val session = incomingMedia[key] ?: return true
-                if (session.senderNodeId != fromNodeId) return true
+                if (session.senderNodeId != sender) return true
                 val index = parts[3].toIntOrNull()?.takeIf { it >= 0 } ?: return true
                 if (index < session.nextChunk) return true // duplicate/replayed chunk already committed
                 if (index != session.nextChunk) {
@@ -1679,9 +1683,10 @@ class MainActivity : Activity() {
                 }
             }
             "E" -> {
-                val key = "$peerId|${parts[2]}"
+                val sender = fromNodeId ?: return true
+                val key = "$sender|${parts[2]}"
                 val session = incomingMedia[key] ?: return true
-                if (session.senderNodeId != fromNodeId) return true
+                if (session.senderNodeId != sender) return true
                 incomingMedia.remove(key)
                 val item = session.writer.finish()
                 if (item == null) {
@@ -1996,7 +2001,12 @@ class MainActivity : Activity() {
         input.text.clear()
         appendMessage(peerId, ChatMessage(text, true))
         if (!sendSecurePayload(peerId, text, asChatText = true)) {
-            Toast.makeText(this, "Secure identity/route is not ready yet. Keep both apps open and retry after the peer appears.", Toast.LENGTH_LONG).show()
+            val message = if (chatSendRateLimited) {
+                "Sending paused to protect mesh delivery limits. Try again after the short rate-limit window."
+            } else {
+                "Secure identity/route is not ready yet. Keep both apps open and retry after the peer appears."
+            }
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -3363,6 +3373,16 @@ class MainActivity : Activity() {
                     listOf(JSONObject().put("kind", "text").put("text", plaintext).toString())
                 }
             } else listOf(plaintext)
+
+            // Reserve the receiver-mirrored budget for the whole chat message before sending any
+            // envelopes, so a split message is accepted or paused as a unit.
+            if (asChatText) {
+                chatSendRateLimited = false
+                if (!outgoingChatSendLimiter.allowBatch(destination, payloads.size)) {
+                    chatSendRateLimited = true
+                    return false
+                }
+            }
 
             for (payload in payloads) {
                 val envelope = meshSecurity.seal(destination, payload) ?: return false
