@@ -380,8 +380,10 @@ class MainActivity : Activity() {
         try { wifiServerSocket?.close() } catch (_: Exception) { }
         mediaReceiveExecutor.shutdownNow()
         meshProtocolExecutor.shutdownNow()
-        incomingMedia.values.forEach { try { it.writer.abort() } catch (_: Exception) { } }
-        incomingMedia.clear()
+        synchronized(incomingMedia) {
+            incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
+            incomingMedia.clear()
+        }
         try {
             val channel = wifiP2pChannel
             if (hasWifiDirectRuntimePermission() && channel != null) wifiP2pManager?.removeGroup(channel, null)
@@ -1566,16 +1568,24 @@ class MainActivity : Activity() {
     } catch (_: Exception) { "" }
 
     private fun reapExpiredIncomingMedia() {
-        val now = System.currentTimeMillis()
-        val expired = incomingMedia.filterValues {
-            now - it.lastActivityAt > INCOMING_MEDIA_IDLE_TIMEOUT_MS ||
-                now - it.startedAt > INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS
-        }.keys.toList()
-        expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
+        synchronized(incomingMedia) {
+            val now = System.currentTimeMillis()
+            val expired = incomingMedia.filterValues {
+                now - it.lastActivityAt > INCOMING_MEDIA_IDLE_TIMEOUT_MS ||
+                    now - it.startedAt > INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS
+            }.keys.toList()
+            expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
+        }
     }
 
     /** Returns true for a consumed private-media control frame so it never appears as chat text. */
     private fun handleIncomingMediaWireText(
+        peerId: String, text: String, sourceTransportId: String? = null, fromNodeId: String? = null
+    ): Boolean = synchronized(incomingMedia) {
+        handleIncomingMediaWireTextLocked(peerId, text, sourceTransportId, fromNodeId)
+    }
+
+    private fun handleIncomingMediaWireTextLocked(
         peerId: String, text: String, sourceTransportId: String? = null, fromNodeId: String? = null
     ): Boolean {
         if (!text.startsWith(MEDIA_WIRE_PREFIX)) return false
