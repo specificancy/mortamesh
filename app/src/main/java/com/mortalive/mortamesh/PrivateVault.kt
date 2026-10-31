@@ -572,6 +572,18 @@ class PrivateVault(private val context: Context) {
     }
 
     private fun loadIndex() {
+        // saveIndex fsyncs the temporary encrypted snapshot before its atomic rename. If a
+        // process died between those steps, promote the candidate and let the normal GCM/JSON
+        // validation below decide whether it is recoverable.
+        if (!indexFile.isFile && indexTempFile.isFile) {
+            try {
+                Os.rename(indexTempFile.absolutePath, indexFile.absolutePath)
+                syncVaultDirectory()
+            } catch (_: Exception) {
+                indexUnavailable = true
+                return
+            }
+        }
         if (!indexFile.isFile) {
             val hasEncryptedMedia = vaultDir.listFiles()?.any { it.isFile && it.name.endsWith(".mmv") } == true
             val hasPendingIndex = indexTempFile.isFile
