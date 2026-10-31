@@ -215,6 +215,7 @@ class MainActivity : Activity() {
                 meshRoutes.entries.removeAll { now - it.value.lastSeen > MESH_ROUTE_MAX_AGE_MS }
                 if (expired) renderIfBrowseScreen()
                 gossipLocalIdentity()
+                mediaReceiveExecutor.execute { reapExpiredIncomingMedia() }
             } catch (_: Exception) {
                 // One radio error must not stop future route refreshes.
             } finally {
@@ -246,6 +247,7 @@ class MainActivity : Activity() {
         const val REQUEST_TAKE_PHOTO = 951
         const val REQUEST_RECORD_VIDEO = 952
         const val MEDIA_WIRE_PREFIX = "@MM1|"
+        const val MAX_INCOMING_MEDIA_SESSIONS = 4
         const val MEDIA_WIFI_CHUNK_BYTES = 36 * 1024
         const val MEDIA_BLE_CHUNK_BYTES = 900
         const val WIFI_MAX_FRAME_CHARS = 400_000
@@ -899,6 +901,17 @@ class MainActivity : Activity() {
         }
         addSectionTitle(p, "Private Vault", "Your photos and videos stay inside Morta Mesh.")
         p.addView(vSpace(14))
+        if (privateVault.isUnavailable()) {
+            val unavailable = card()
+            unavailable.addView(label("Vault temporarily unavailable", 16f, ink, true))
+            unavailable.addView(label("Android's secure key storage could not be read. Your encrypted items have not been changed or deleted. Try again in a moment; if this keeps happening, restart the app.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setPadding(0, dp(10), 0, dp(14))
+            })
+            unavailable.addView(primaryButton("Retry") { privateVault.retryLoad(); render() })
+            p.addView(unavailable)
+            return scrollPage(p)
+        }
         if (!vaultUnlocked) {
             val locked = card()
             locked.gravity = Gravity.CENTER_HORIZONTAL
@@ -1207,7 +1220,7 @@ class MainActivity : Activity() {
                         ))
                         Toast.makeText(
                             this,
-                            "${if (isVideo) "Video needs Wi-Fi Direct" else "Photo uses Bluetooth"}; the encrypted item is queued for $peerName. It will retry when that recipient is reachable.",
+                            "${if (isVideo) "Video needs Wi-Fi Direct" else "Photo uses Bluetooth"}; the encrypted item is queued for $peerName. It will send when that recipient is directly connected on that link type (media is never relayed).",
                             Toast.LENGTH_LONG
                         ).show()
                         if (currentScreen == Screen.VAULT) render()
@@ -1301,32 +1314,22 @@ class MainActivity : Activity() {
         return nodeId?.let { MESH_PREFIX + it } ?: peerId
     }
 
+    /**
+     * Media never travels through relays: relays cannot see (end-to-end encrypted) that a frame is
+     * media, so they could forward it over the wrong radio. A direct link to the recipient on the
+     * required transport is the only acceptable path; otherwise the item stays queued.
+     */
     private fun chooseMediaTransport(peerId: String, mimeType: String): String? {
         val required = MediaTransferPolicy.requiredTransport(mimeType)
-        val nodeId = resolveTargetNode(peerId)
-        val route = nodeId?.let { meshRoutes[it] }?.takeIf {
-            System.currentTimeMillis() - it.lastSeen <= MESH_ROUTE_MAX_AGE_MS && hasPeerTransport(it.nextHop)
-        }
+        val nodeId = resolveTargetNode(peerId) ?: return null
         val bluetoothReady: (String) -> Boolean = { id ->
             !id.startsWith(WIFI_PREFIX) &&
                 (clientReady.contains(id) || (serverDevices.containsKey(id) && subscribedDevices.contains(id)))
         }
-        return when (required) {
-            MediaTransferPolicy.RequiredTransport.WIFI_DIRECT -> when {
-                peerId.startsWith(WIFI_PREFIX) && wifiWriters.containsKey(peerId) &&
-                    (nodeId == null || physicalNodeByTransport[peerId] == nodeId) -> peerId
-                nodeId != null -> connectedTransportIds().firstOrNull {
-                    it.startsWith(WIFI_PREFIX) && physicalNodeByTransport[it] == nodeId
-                } ?: route?.nextHop?.takeIf { it.startsWith(WIFI_PREFIX) && wifiWriters.containsKey(it) }
-                route?.nextHop?.startsWith(WIFI_PREFIX) == true && wifiWriters.containsKey(route.nextHop) -> route.nextHop
-                else -> null
-            }
-            MediaTransferPolicy.RequiredTransport.BLUETOOTH_LE -> when {
-                !peerId.startsWith(WIFI_PREFIX) && !peerId.startsWith(MESH_PREFIX) &&
-                    bluetoothReady(peerId) && (nodeId == null || physicalNodeByTransport[peerId] == nodeId) -> peerId
-                route != null && !route.nextHop.startsWith(WIFI_PREFIX) && bluetoothReady(route.nextHop) -> route.nextHop
-                nodeId != null -> connectedTransportIds().firstOrNull { bluetoothReady(it) && physicalNodeByTransport[it] == nodeId }
-                else -> null
+        return connectedTransportIds().firstOrNull { id ->
+            physicalNodeByTransport[id] == nodeId && when (required) {
+                MediaTransferPolicy.RequiredTransport.WIFI_DIRECT -> id.startsWith(WIFI_PREFIX) && wifiWriters.containsKey(id)
+                MediaTransferPolicy.RequiredTransport.BLUETOOTH_LE -> !id.startsWith(MESH_PREFIX) && bluetoothReady(id)
             }
         }
     }
@@ -1519,9 +1522,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun sendMediaWireText(chatPeerId: String, targetPeerId: String, wireText: String): Boolean {
+    private fun sendMediaWireText(chatPeerId: String, targetPeerId: String, wireText: String, strict: Boolean = true): Boolean {
         // Every media start/chunk/end control is wrapped in recipient-only E2E encryption.
-        return sendSecurePayload(chatPeerId, wireText, targetPeerId)
+        // Start/chunk/end frames are pinned to the chosen direct link; small ACKs may route normally.
+        return sendSecurePayload(chatPeerId, wireText, targetPeerId, strictFirstHop = strict)
     }
 
     private fun waitForBluetoothMediaQueue(targetPeerId: String) {
@@ -1548,31 +1552,54 @@ class MainActivity : Activity() {
         String(Base64.decode(text, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
     } catch (_: Exception) { "" }
 
-    /** Returns true for a consumed private-media control frame so it never appears as chat text. */
-    private fun handleIncomingMediaWireText(peerId: String, text: String): Boolean {
-        if (!text.startsWith(MEDIA_WIRE_PREFIX)) return false
+    private fun reapExpiredIncomingMedia() {
         val now = System.currentTimeMillis()
         val expired = incomingMedia.filterValues { now - it.lastActivityAt > 120_000L }.keys.toList()
         expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
+    }
+
+    /** Returns true for a consumed private-media control frame so it never appears as chat text. */
+    private fun handleIncomingMediaWireText(
+        peerId: String, text: String, sourceTransportId: String? = null, fromNodeId: String? = null
+    ): Boolean {
+        if (!text.startsWith(MEDIA_WIRE_PREFIX)) return false
+        reapExpiredIncomingMedia()
         val parts = text.split("|")
         if (parts.size < 3) return true
+        if (parts[1] == "S" || parts[1] == "C" || parts[1] == "E") {
+            // Media must arrive over a direct physical link from its authenticated sender.
+            val direct = sourceTransportId != null && fromNodeId != null &&
+                synchronized(physicalNodeByTransport) { physicalNodeByTransport[sourceTransportId] == fromNodeId }
+            if (!direct) return true
+        }
         when (parts[1]) {
             "S" -> {
                 if (parts.size < 6) return true
                 val transferId = parts[2]
                 if (runCatching { UUID.fromString(transferId).toString() }.getOrNull() != transferId) return true
                 if (privateVault.receivedTransfer(transferId) != null) {
-                    sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|$transferId")
+                    sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|$transferId", strict = false)
                     return true
                 }
                 val fileName = decodeWire(parts[3]).ifBlank { "private_media" }
-                val mime = decodeWire(parts[4]).ifBlank { "application/octet-stream" }
+                val mime = MediaTransferPolicy.normalizeMime(decodeWire(parts[4]))
+                if (!MediaTransferPolicy.isAcceptedMime(mime)) {
+                    runOnUiThread { Toast.makeText(this, "Incoming media type is not supported and was ignored.", Toast.LENGTH_LONG).show() }
+                    return true
+                }
+                val viaWifi = sourceTransportId?.startsWith(WIFI_PREFIX) == true
+                if (!MediaTransferPolicy.isTransportAllowed(mime, viaWifi)) {
+                    runOnUiThread { Toast.makeText(this, "Media arrived over the wrong link type and was ignored.", Toast.LENGTH_LONG).show() }
+                    return true
+                }
                 val size = parts[5].toLongOrNull() ?: return true
                 if (size !in 1L..PrivateVault.MAX_MEDIA_BYTES) {
                     runOnUiThread { Toast.makeText(this, "Incoming media exceeds the allowed size.", Toast.LENGTH_LONG).show() }
                     return true
                 }
                 val key = "$peerId|$transferId"
+                // Bound concurrent partial files; the sender keeps the item queued and retries later.
+                if (!incomingMedia.containsKey(key) && incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
                 incomingMedia.remove(key)?.writer?.abort()
                 val writer = privateVault.beginIncoming(transferId, fileName, mime, size, nameFor(peerId))
                 if (writer == null) {
@@ -1614,7 +1641,7 @@ class MainActivity : Activity() {
                     runOnUiThread { Toast.makeText(this, "Media transfer was incomplete; no file was saved.", Toast.LENGTH_LONG).show() }
                 } else {
                     // finish() returns only after the receiver's encrypted file and index commit.
-                    sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|${session.writer.transferId}")
+                    sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|${session.writer.transferId}", strict = false)
                     runOnUiThread {
                         appendMessage(peerId, ChatMessage("🔒 ${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} received · saved in Private Vault", false))
                         if (currentScreen == Screen.VAULT) render()
@@ -3182,7 +3209,7 @@ class MainActivity : Activity() {
             val chatId = chatIdForNode(opened.fromNodeId, sourcePeerId)
             val content = opened.text
             if (content.startsWith(MEDIA_WIRE_PREFIX)) {
-                mediaReceiveExecutor.execute { handleIncomingMediaWireText(chatId, content) }
+                mediaReceiveExecutor.execute { handleIncomingMediaWireText(chatId, content, sourcePeerId, opened.fromNodeId) }
             } else {
                 handleDecryptedChatPayload(chatId, opened.fromNodeId, content)
             }
@@ -3218,7 +3245,8 @@ class MainActivity : Activity() {
         chatPeerId: String,
         plaintext: String,
         forcedFirstHop: String? = null,
-        asChatText: Boolean = false
+        asChatText: Boolean = false,
+        strictFirstHop: Boolean = false
     ): Boolean {
         return try {
             val destination = resolveTargetNode(chatPeerId) ?: return false
@@ -3228,7 +3256,12 @@ class MainActivity : Activity() {
             val routedHop = route?.nextHop?.takeIf { hasPeerTransport(it) }
             // If the cached route just went stale, send to any active neighbor; bounded flooding at
             // relays can still find the recipient while a fresh identity advertisement propagates.
-            val firstHop = preferredForced ?: routedHop ?: connectedTransportIds().firstOrNull() ?: return false
+            val firstHop = if (strictFirstHop) {
+                // Media: only the exact direct link chosen by the transport policy; never fall back.
+                preferredForced ?: return false
+            } else {
+                preferredForced ?: routedHop ?: connectedTransportIds().firstOrNull() ?: return false
+            }
             val isWifi = firstHop.startsWith(WIFI_PREFIX)
             val payloads: List<String> = if (asChatText) {
                 val textBytes = plaintext.toByteArray(Charsets.UTF_8).size
