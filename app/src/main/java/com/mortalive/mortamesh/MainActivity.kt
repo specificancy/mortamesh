@@ -117,6 +117,9 @@ class MainActivity : Activity() {
     private var pendingCaptureMime: String = "image/jpeg"
     private data class IncomingMediaSession(
         val writer: PrivateVault.IncomingWrite,
+        val senderNodeId: String,
+        val expectedBytes: Long,
+        val startedAt: Long = System.currentTimeMillis(),
         var nextChunk: Int = 0,
         var lastActivityAt: Long = System.currentTimeMillis()
     )
@@ -158,6 +161,8 @@ class MainActivity : Activity() {
     private val identityRecords = linkedMapOf<String, JSONObject>()
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
+    private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
+    private val worldChatIngressLimiter = IngressRateLimiter(maxPerPeer = 30, maxGlobal = 120)
     private val incomingTextFragments = linkedMapOf<String, IncomingTextFragments>()
     private val transportIdentitySentAt = linkedMapOf<String, Long>()
     private val transportWorldSyncSentAt = linkedMapOf<String, Long>()
@@ -248,6 +253,9 @@ class MainActivity : Activity() {
         const val REQUEST_RECORD_VIDEO = 952
         const val MEDIA_WIRE_PREFIX = "@MM1|"
         const val MAX_INCOMING_MEDIA_SESSIONS = 4
+        const val MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER = 2
+        const val INCOMING_MEDIA_IDLE_TIMEOUT_MS = 120_000L
+        const val INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS = 30L * 60L * 1000L
         const val MEDIA_WIFI_CHUNK_BYTES = 36 * 1024
         const val MEDIA_BLE_CHUNK_BYTES = 900
         const val WIFI_MAX_FRAME_CHARS = 400_000
@@ -1554,7 +1562,10 @@ class MainActivity : Activity() {
 
     private fun reapExpiredIncomingMedia() {
         val now = System.currentTimeMillis()
-        val expired = incomingMedia.filterValues { now - it.lastActivityAt > 120_000L }.keys.toList()
+        val expired = incomingMedia.filterValues {
+            now - it.lastActivityAt > INCOMING_MEDIA_IDLE_TIMEOUT_MS ||
+                now - it.startedAt > INCOMING_MEDIA_ABSOLUTE_TIMEOUT_MS
+        }.keys.toList()
         expired.forEach { key -> incomingMedia.remove(key)?.writer?.abort() }
     }
 
@@ -1577,7 +1588,8 @@ class MainActivity : Activity() {
                 if (parts.size < 6) return true
                 val transferId = parts[2]
                 if (runCatching { UUID.fromString(transferId).toString() }.getOrNull() != transferId) return true
-                if (privateVault.receivedTransfer(transferId) != null) {
+                val authenticatedSender = fromNodeId ?: return true
+                if (privateVault.receivedTransfer(transferId, authenticatedSender) != null) {
                     sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|$transferId", strict = false)
                     return true
                 }
@@ -1598,20 +1610,30 @@ class MainActivity : Activity() {
                     return true
                 }
                 val key = "$peerId|$transferId"
-                // Bound concurrent partial files; the sender keeps the item queued and retries later.
-                if (!incomingMedia.containsKey(key) && incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
-                incomingMedia.remove(key)?.writer?.abort()
-                val writer = privateVault.beginIncoming(transferId, fileName, mime, size, nameFor(peerId))
+                val existing = incomingMedia[key]
+                val sessionsFromSender = incomingMedia.entries.count {
+                    it.key != key && it.value.senderNodeId == authenticatedSender
+                }
+                // Limit both global concurrency and per-identity slot use; a single neighbor
+                // cannot hold every receiver slot open.
+                if (existing == null && incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
+                if (sessionsFromSender >= MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER) return true
+                existing?.writer?.abort()
+                incomingMedia.remove(key)
+                val writer = privateVault.beginIncoming(
+                    transferId, fileName, mime, size, nameFor(peerId), authenticatedSender
+                )
                 if (writer == null) {
-                    runOnUiThread { Toast.makeText(this, "Could not create an encrypted incoming file.", Toast.LENGTH_LONG).show() }
+                    runOnUiThread { Toast.makeText(this, "Could not create an encrypted incoming file or the vault storage quota is full.", Toast.LENGTH_LONG).show() }
                     return true
                 }
-                incomingMedia[key] = IncomingMediaSession(writer)
+                incomingMedia[key] = IncomingMediaSession(writer, authenticatedSender, size)
             }
             "C" -> {
                 if (parts.size < 5) return true
                 val key = "$peerId|${parts[2]}"
                 val session = incomingMedia[key] ?: return true
+                if (session.senderNodeId != fromNodeId) return true
                 val index = parts[3].toIntOrNull() ?: return true
                 if (index != session.nextChunk) {
                     session.writer.abort()
@@ -1635,7 +1657,9 @@ class MainActivity : Activity() {
             }
             "E" -> {
                 val key = "$peerId|${parts[2]}"
-                val session = incomingMedia.remove(key) ?: return true
+                val session = incomingMedia[key] ?: return true
+                if (session.senderNodeId != fromNodeId) return true
+                incomingMedia.remove(key)
                 val item = session.writer.finish()
                 if (item == null) {
                     runOnUiThread { Toast.makeText(this, "Media transfer was incomplete; no file was saved.", Toast.LENGTH_LONG).show() }
@@ -1651,7 +1675,8 @@ class MainActivity : Activity() {
             }
             "A" -> {
                 val transferId = parts.getOrNull(2) ?: return true
-                val result = privateVault.markTransferDelivered(transferId)
+                val authenticatedSender = fromNodeId ?: return true
+                val result = privateVault.markTransferDelivered(transferId, authenticatedSender)
                 if (result != null) {
                     val (item, firstReceipt) = result
                     mediaAckWaiters[transferId]?.countDown()
@@ -3096,17 +3121,37 @@ class MainActivity : Activity() {
                 }
             }
             text.startsWith(MESH_PACKET_PREFIX) -> meshProtocolExecutor.execute {
+                // Enforce a physical-neighbor budget before signature verification or decryption.
+                if (!meshIngressLimiter.allow(sourcePeerId)) return@execute
                 val parts = text.removePrefix(MESH_PACKET_PREFIX).split('|', limit = 2)
                 if (parts.size != 2) return@execute
                 val ttl = parts[0].toIntOrNull()?.takeIf { it in 0..MESH_ROUTE_TTL } ?: return@execute
                 val envelope = try { JSONObject(decodeWire(parts[1])) } catch (_: Exception) { return@execute }
                 if (!meshSecurity.verifyRoutableEnvelope(envelope)) return@execute
-                // Signed ID/timestamp are checked before this durable ledger records the packet.
-                if (!replayGuard.acceptIfNew(envelope.optString("id"))) return@execute
-                val opened = if (envelope.optString("to") == localNodeId) meshSecurity.open(envelope) else null
-                mainHandler.post { handleRoutedEnvelope(sourcePeerId, ttl, envelope, opened) }
+                val messageId = envelope.optString("id")
+                val destination = envelope.optString("to")
+                val opened = if (destination == localNodeId) {
+                    // A failed pin check or AEAD tag must never consume a durable replay ID.
+                    val decrypted = meshSecurity.open(envelope) ?: return@execute
+                    if (!replayGuard.acceptIfNew(messageId)) return@execute
+                    decrypted
+                } else {
+                    // Relays cannot decrypt; use only a bounded in-memory forwarding cache so
+                    // unpinned, merely well-signed traffic cannot evict recipient replay history.
+                    synchronized(seenMeshPackets) {
+                        if (seenMeshPackets.containsKey(messageId)) return@execute
+                        seenMeshPackets[messageId] = System.currentTimeMillis()
+                    }
+                    pruneSeenCaches()
+                    null
+                }
+                mainHandler.post {
+                    handleRoutedEnvelope(sourcePeerId, ttl, envelope, opened, deduplicated = true)
+                }
             }
             text.startsWith(WORLD_CHAT_PREFIX) -> meshProtocolExecutor.execute {
+                // World posts are public input: cap signature-verification work per incoming link.
+                if (!worldChatIngressLimiter.allow(sourcePeerId)) return@execute
                 val frameBytes = text.toByteArray(Charsets.UTF_8)
                 if (frameBytes.size > MAX_WORLD_CHAT_FRAME_BYTES) return@execute
                 val parts = text.removePrefix(WORLD_CHAT_PREFIX).split('|', limit = 2)
@@ -3195,11 +3240,14 @@ class MainActivity : Activity() {
         if (currentScreen == Screen.CHAT) refreshChatHeaderOrNav()
     }
 
-    private fun handleRoutedEnvelope(sourcePeerId: String, ttl: Int, envelope: JSONObject, opened: MeshSecurity.OpenedMessage?) {
+    private fun handleRoutedEnvelope(
+        sourcePeerId: String, ttl: Int, envelope: JSONObject, opened: MeshSecurity.OpenedMessage?,
+        deduplicated: Boolean = false
+    ) {
         pruneSeenCaches()
         val messageId = envelope.optString("id")
         if (messageId.isBlank()) return
-        synchronized(seenMeshPackets) {
+        if (!deduplicated) synchronized(seenMeshPackets) {
             if (seenMeshPackets.containsKey(messageId)) return
             seenMeshPackets[messageId] = System.currentTimeMillis()
         }
@@ -3293,7 +3341,8 @@ class MainActivity : Activity() {
                     val maxBleFrame = (mtu.coerceAtLeast(23) - 9) * 255
                     if (wireBytes > maxBleFrame) return false
                 }
-                if (!replayGuard.acceptIfNew(envelope.optString("id"))) return false
+                // Outbound IDs are cached locally for loop suppression; the durable replay ledger
+                // is reserved for successfully decrypted incoming messages.
                 synchronized(seenMeshPackets) { seenMeshPackets[envelope.optString("id")] = System.currentTimeMillis() }
                 pruneSeenCaches()
                 if (isWifi || Looper.myLooper() == Looper.getMainLooper()) {
