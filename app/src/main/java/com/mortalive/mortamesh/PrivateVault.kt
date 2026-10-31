@@ -527,6 +527,7 @@ class PrivateVault(private val context: Context) {
 
     @Synchronized private fun saveIndex(): Boolean {
         if (indexUnavailable) return false
+        var indexReplaced = false
         return try {
             val array = JSONArray()
             items.values.forEach { item ->
@@ -552,11 +553,17 @@ class PrivateVault(private val context: Context) {
             }
             // The index update is atomic: never replace a good index with a partial write.
             Os.rename(indexTempFile.absolutePath, indexFile.absolutePath)
+            indexReplaced = true
             syncVaultDirectory()
             indexLoadedOk = true
             true
         } catch (_: Exception) {
             try { indexTempFile.delete() } catch (_: Exception) { }
+            if (indexReplaced) {
+                // The replacement happened but its directory sync failed; disk and memory may no
+                // longer agree. Block follow-up writes until the on-disk snapshot is reloaded.
+                indexUnavailable = true
+            }
             false
         }
     }
