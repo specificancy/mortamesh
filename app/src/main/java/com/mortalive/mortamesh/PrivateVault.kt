@@ -260,9 +260,9 @@ class PrivateVault(private val context: Context) {
     @Synchronized fun markTransferDelivered(transferId: String, authenticatedSenderNodeId: String): Pair<Item, Boolean>? {
         // The signed ACK must come from the exact logical recipient saved with this transfer.
         val current = items.values.firstOrNull {
-            it.direction == "Sent" && it.transferId == transferId
+            it.direction == "Sent" && it.transferId == transferId &&
+                MediaTransferPolicy.isAcknowledgementFromRecipient(it.recipientId, authenticatedSenderNodeId)
         } ?: return null
-        if (!MediaTransferPolicy.isAcknowledgementFromRecipient(current.recipientId, authenticatedSenderNodeId)) return null
         if (current.transferState == "DELIVERED") return current to false
         val updated = current.copy(transferState = "DELIVERED")
         items[updated.id] = updated
