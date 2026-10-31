@@ -1598,11 +1598,15 @@ class MainActivity : Activity() {
                 val transferId = parts[2]
                 if (runCatching { UUID.fromString(transferId).toString() }.getOrNull() != transferId) return true
                 val authenticatedSender = fromNodeId ?: return true
-                if (!mediaStartIngressLimiter.allow(authenticatedSender)) return true
+                val key = "$peerId|$transferId"
+                // A completed or already-active transfer is an idempotent retry, not a new
+                // allocation. Let it finish/ACK without spending the new-session rate budget.
                 if (privateVault.receivedTransfer(transferId, authenticatedSender) != null) {
                     sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|$transferId", strict = false)
                     return true
                 }
+                if (incomingMedia.containsKey(key)) return true
+                if (!mediaStartIngressLimiter.allow(authenticatedSender)) return true
                 val fileName = decodeWire(parts[3]).ifBlank { "private_media" }
                 val mime = MediaTransferPolicy.normalizeMime(decodeWire(parts[4]))
                 if (!MediaTransferPolicy.isAcceptedMime(mime)) {
@@ -1619,16 +1623,13 @@ class MainActivity : Activity() {
                     runOnUiThread { Toast.makeText(this, "Incoming media exceeds the allowed size.", Toast.LENGTH_LONG).show() }
                     return true
                 }
-                val key = "$peerId|$transferId"
-                val existing = incomingMedia[key]
-                val sessionsFromSender = incomingMedia.entries.count {
-                    it.key != key && it.value.senderNodeId == authenticatedSender
+                val sessionsFromSender = incomingMedia.values.count {
+                    it.senderNodeId == authenticatedSender
                 }
                 // Limit both global concurrency and per-identity slot use; a single neighbor
                 // cannot hold every receiver slot open.
                 // Repeated start frames for an already active transfer are harmless retries;
                 // do not abort and recreate the receiver's partial file.
-                if (existing != null) return true
                 if (incomingMedia.size >= MAX_INCOMING_MEDIA_SESSIONS) return true
                 if (sessionsFromSender >= MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER) return true
                 val writer = privateVault.beginIncoming(
