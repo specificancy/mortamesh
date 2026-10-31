@@ -149,8 +149,8 @@ class PrivateVault(private val context: Context) {
     private val items = linkedMapOf<String, Item>()
     private data class IncomingReservation(val expectedBytes: Long, var remainingBytes: Long, val senderNodeId: String)
     private val incomingReservations = linkedMapOf<String, IncomingReservation>()
-    // Set when the index could not be read for a possibly transient reason (e.g. Keystore). While
-    // set, nothing is written, so a good index is never replaced by an empty one.
+    // Set when the index is unreadable, missing while encrypted data exists, or may be affected
+    // by a transient Keystore/storage error. While set, writes are blocked to preserve recoverable data.
     @Volatile private var indexUnavailable = false
     private var indexLoadedOk = false
 
@@ -645,6 +645,9 @@ class PrivateVault(private val context: Context) {
                     indexUnavailable = true
                 }
             }
+            // A permanently unreadable index is not an empty vault. Keep new writes blocked until
+            // recovery is available instead of making the existing encrypted files undiscoverable.
+            indexUnavailable = true
         }
     }
 
