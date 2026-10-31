@@ -56,8 +56,16 @@ internal class IngressRateLimiter(
     }
 
     @Synchronized
-    fun allow(peerId: String, nowMs: Long = System.currentTimeMillis()): Boolean {
-        if (peerId.isBlank()) return false
+    fun allow(peerId: String, nowMs: Long = System.currentTimeMillis()): Boolean =
+        allowBatch(peerId, 1, nowMs)
+
+    /**
+     * Atomically reserve a group of envelopes. A split chat message is accepted or paused as a
+     * whole; it cannot consume part of the receiver's budget and then lose its final chunks.
+     */
+    @Synchronized
+    fun allowBatch(peerId: String, count: Int, nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (peerId.isBlank() || count !in 1..maxPerPeer || count > maxGlobal) return false
         if (globalStartedAt == 0L || nowMs < globalStartedAt || nowMs - globalStartedAt >= windowMs) {
             globalStartedAt = nowMs
             globalAccepted = 0
@@ -73,10 +81,10 @@ internal class IngressRateLimiter(
             peerWindow = Window(nowMs, 0)
             peers[peerId] = peerWindow
         }
-        if (peerWindow.accepted >= maxPerPeer || globalAccepted >= maxGlobal) return false
+        if (peerWindow.accepted + count > maxPerPeer || globalAccepted + count > maxGlobal) return false
 
-        peerWindow.accepted++
-        globalAccepted++
+        peerWindow.accepted += count
+        globalAccepted += count
         return true
     }
 }
