@@ -58,6 +58,14 @@ Transfer policy:
 
 The recipient stores received bytes encrypted in its own Private Vault. Local vault encryption uses AES-GCM with Android Keystore, while the media bytes and transfer controls are also protected by end-to-end message encryption in transit.
 
+## Global Media Relay (proposed; not yet implemented)
+
+The separate [Global Media Relay architecture](GLOBAL_MEDIA_RELAY.md) describes an optional **Send to Global Chat** path: upload directly when Mortalive is reachable; otherwise carry encrypted chunks through nearby devices that explicitly opt into Peer Mode; let an opted-in internet gateway upload the package; then publish only after Mortalive verifies the origin and moderation passes.
+
+This is intentionally separate from private chat media. Relays can store and forward ciphertext only, while Mortalive's ingestion/moderation service must be able to inspect the submitted public video. It is therefore sender-to-server encrypted publishing, not end-to-end encryption to a private recipient. The current app has no Mortalive account binding, internet upload API, server ingestion endpoint, or moderation integration. Existing private-media rules remain unchanged: private photos/videos are never opportunistically relayed.
+
+Peer Mode must have separate, explicit opt-ins for carrying encrypted packages and using the device's internet as a gateway. The design also defines consent, data-use controls, chunk resume, bounded relay storage, expiry, hop limits, deduplication, moderation states, and a published-only-after-approval rule. See the linked design before implementation.
+
 ## Private Vault
 
 - Media files live in `filesDir/private_media_vault` as app-private `.mmv` files; they are not exported to public gallery directories.
@@ -81,7 +89,7 @@ Requirements: Android Studio with Android SDK Platform 35, JDK 17, Kotlin 2.0.21
 
 ## Release/readiness status
 
-This is an implementation-stage prototype, **not a verified production release**. The latest security patches on this repository's `main` branch have not yet been verified by a Gradle build, JVM test run, or real-device test. BLE/Wi-Fi Direct tests, three-device routing, encryption interoperability, storage-recovery checks, and independent cryptographic review remain required before release.
+This is an implementation-stage prototype, **not a verified production release**. The latest security-patched `main` commit (`b2a12c8`) passed the Android CI workflow (run #41232413980), including `clean testDebugUnitTest assembleDebug` and APK artifact upload. That verifies compilation, the configured JVM unit-test task, and debug APK assembly; it does not replace physical-device or security testing. BLE/Wi-Fi Direct tests, three-device routing, encryption interoperability, storage-recovery checks, and independent cryptographic review remain required before release. Global Media Relay is only a documented proposal and is not part of this build.
 
 Media policy is based on type, never file size: text uses an available authenticated route, photos use Bluetooth LE, and videos use Wi-Fi Direct only. Media is direct-link-only and remains encrypted in the Private Vault queue until an end-to-end receipt from the saved logical recipient confirms that the recipient's encrypted file and vault index were committed. A receipt from a different pinned peer cannot mark the transfer delivered. Prior unsent media is recovered only when chat history uniquely identifies its intended conversation. Vault media decryption and image decoding run off the main thread; photo previews are downsampled to limit memory pressure.
 
