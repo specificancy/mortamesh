@@ -41,6 +41,38 @@ internal object AnonymousRelayProtocol {
         val chunk: ByteArray
     )
 
+    data class Header(
+        val transferId: String,
+        val ttl: Int,
+        val index: Int,
+        val total: Int,
+        val manifest: JSONObject,
+        val declaredCiphertextBytes: Long
+    )
+
+    /**
+     * Cheap bounded envelope read used for admission control before ECDSA verification and
+     * chunk hashing. All fields are untrusted until parse() succeeds.
+     */
+    fun peekHeader(frameText: String): Header? = try {
+        if (!frameText.startsWith(PREFIX) || frameText.toByteArray(Charsets.UTF_8).size > MAX_FRAME_BYTES) return null
+        val json = JSONObject(frameText.removePrefix(PREFIX))
+        if (json.optInt("v") != 1) return null
+        val transferId = json.optString("id")
+        val ttl = json.optInt("ttl", -1)
+        val index = json.optInt("index", -1)
+        val total = json.optInt("total", -1)
+        if (!isCanonicalUuid(transferId) || ttl !in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS) return null
+        if (total !in 1..MAX_CHUNKS || index !in 0 until total) return null
+        val manifest = JSONObject(json.getString("manifest"))
+        if (manifest.optString("transferId") != transferId) return null
+        val bytes = manifest.optLong("ciphertextBytes", -1L)
+        if (bytes !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return null
+        val expectedTotal = ceil(bytes.toDouble() / CHUNK_BYTES).toInt()
+        if (expectedTotal != total) return null
+        Header(transferId, ttl, index, total, manifest, bytes)
+    } catch (_: Exception) { null }
+
     fun forEachFrame(
         transferId: String,
         manifest: JSONObject,
