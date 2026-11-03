@@ -146,6 +146,7 @@ class MainActivity : Activity() {
     private lateinit var anonymousSubmissionStore: AnonymousSubmissionStore
     private lateinit var anonymousRelayStore: AnonymousRelayStore
     private val anonymousRelayPeerModes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val anonymousRelayCapabilitySeen = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var anonymousGroupValue = ""
     private var anonymousTextValue = ""
     private var anonymousSelectedFile: File? = null
@@ -3342,7 +3343,8 @@ class MainActivity : Activity() {
     private fun announceAnonymousRelayMode(peerId: String) {
         if (!hasPeerTransport(peerId)) return
         val enabled = if (anonymousRelayCarryEnabled()) "1" else "0"
-        runCatching { sendTextToPeer(peerId, ANONYMOUS_RELAY_CAPABILITY_PREFIX + enabled) }
+        val signedCapability = meshSecurity.createWorldPost(nickname, "morta-anon-relay:v1:carry=$enabled") ?: return
+        runCatching { sendTextToPeer(peerId, ANONYMOUS_RELAY_CAPABILITY_PREFIX + encodeWire(signedCapability.toString())) }
         if (enabled == "1") forwardStoredAnonymousTransfersTo(peerId)
     }
 
@@ -3433,11 +3435,24 @@ class MainActivity : Activity() {
         if (text.length > 384 * 1024) return
         when {
             text.startsWith(ANONYMOUS_RELAY_CAPABILITY_PREFIX) -> {
-                val capability = text.removePrefix(ANONYMOUS_RELAY_CAPABILITY_PREFIX).trim()
-                if (capability == "1" || capability == "0") {
-                    anonymousRelayPeerModes[sourcePeerId] = capability == "1"
-                    if (capability == "1") mainHandler.post { forwardStoredAnonymousTransfersTo(sourcePeerId) }
+                val signed = runCatching {
+                    JSONObject(decodeWire(text.removePrefix(ANONYMOUS_RELAY_CAPABILITY_PREFIX)))
+                }.getOrNull() ?: return
+                if (!meshSecurity.verifyWorldPost(signed)) return
+                val nodeId = signed.optString("node")
+                val transportNode = nodeForTransport(sourcePeerId)
+                if (transportNode != null && transportNode != nodeId) return
+                val messageId = signed.optString("id")
+                val now = System.currentTimeMillis()
+                anonymousRelayCapabilitySeen.entries.removeAll { now - it.value > 7L * 24L * 60L * 60L * 1000L }
+                if (messageId.isBlank() || anonymousRelayCapabilitySeen.putIfAbsent(messageId, now) != null) return
+                val mode = when (signed.optString("text")) {
+                    "morta-anon-relay:v1:carry=1" -> true
+                    "morta-anon-relay:v1:carry=0" -> false
+                    else -> return
                 }
+                anonymousRelayPeerModes[sourcePeerId] = mode
+                if (mode) mainHandler.post { forwardStoredAnonymousTransfersTo(sourcePeerId) }
             }
             text.startsWith(AnonymousRelayProtocol.PREFIX) -> meshProtocolExecutor.execute {
                 if (!preferences.getBoolean("anonymous_relay_carry_enabled", false)) return@execute
