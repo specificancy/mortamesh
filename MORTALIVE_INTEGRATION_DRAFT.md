@@ -45,7 +45,9 @@ The relay-visible manifest contains an anonymous transfer ID, media type, byte c
 - A separate `@MORTAMESH/2/ANON` wire namespace. It chunks the opaque encrypted package into 96 KiB chunks and binds every chunk to a digest covered by the origin-signed manifest.
 - A bounded persistent store-carry-forward queue for opaque encrypted relay packages. Initial bounds: up to 20 transfers, 250 MiB, eight mesh hops, and an expiry of up to 72 hours.
 - Wi-Fi Direct is used for anonymous media payload chunks. BLE may carry discovery/short control information, not the bulk submission body.
-- **Settings → Peer Mode · encrypted carry** is a separate opt-in. Peer-mode consent is announced using a signed record and is accepted only after the transport is bound to the same authenticated Mesh node identity. Relays only accept/forward anonymous package frames when their own carry opt-in is on and the next peer has opted in.
+- **Settings → Peer Mode · encrypted carry** is a separate opt-in for carrying other people's submissions. Sending the device owner's own submission does not require this setting. Peer-mode consent is announced using a signed record and is accepted only after the transport is bound to the same authenticated Mesh node identity. Relays only accept/forward received anonymous package frames when their own carry opt-in is on and the next peer has opted in.
+- A per-neighbor admission limiter bounds new relay jobs (eight distinct transfers / 250 MiB per hour by default); additional chunks for an already-admitted transfer remain allowed.
+- Draft file encryption/import and large relay forwarding use background executors rather than the Android UI thread.
 - Settings displays relay cache size/count and provides a user-controlled clear-cache action.
 - Existing private chat/media and public World Chat paths remain separate and unchanged.
 
