@@ -78,7 +78,7 @@ internal object AnonymousSubmissionCrypto {
 
         outputFile.parentFile?.mkdirs()
         val temporary = File(outputFile.parentFile, outputFile.name + ".tmp")
-        try {
+        return try {
             val payloadCipher = Cipher.getInstance("AES/GCM/NoPadding")
             payloadCipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(dataKey, "AES"))
             val payloadIv = payloadCipher.iv
