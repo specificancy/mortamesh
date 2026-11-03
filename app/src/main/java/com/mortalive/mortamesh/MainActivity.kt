@@ -2375,22 +2375,36 @@ class MainActivity : Activity() {
     private fun refreshNav() {
         if (!::navBar.isInitialized) return
         navBar.removeAllViews()
-        val items = listOf(
+        val items: List<Triple<Screen?, String, String>> = listOf(
             Triple(Screen.HOME, "⌂", "Home"),
             Triple(Screen.NEARBY, "◎", "Nearby"),
             Triple(Screen.CHATS, "▤", "Chats"),
             Triple(Screen.VAULT, "▣", "Vault"),
+            Triple(null, "₿", "Wallet"),
             Triple(Screen.SETTINGS, "⚙", "Settings")
         )
         items.forEach { (screen, icon, title) ->
-            val selected = currentScreen == screen || ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT || currentScreen == Screen.ANONYMOUS_POST) && screen == Screen.CHATS)
+            val selected = screen != null && (
+                currentScreen == screen ||
+                    ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT || currentScreen == Screen.ANONYMOUS_POST) && screen == Screen.CHATS)
+                )
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(0, dp(5), 0, dp(3))
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { if (screen != Screen.VAULT) vaultUnlocked = false; currentScreen = screen; if (screen != Screen.CHATS) activeChatId = null; render() }
+                setOnClickListener {
+                    if (screen == null) {
+                        vaultUnlocked = false
+                        startActivity(Intent(this@MainActivity, WalletActivity::class.java))
+                    } else {
+                        if (screen != Screen.VAULT) vaultUnlocked = false
+                        currentScreen = screen
+                        if (screen != Screen.CHATS) activeChatId = null
+                        render()
+                    }
+                }
             }
             item.addView(TextView(this).apply {
                 text = icon
