@@ -61,7 +61,7 @@ class WalletActivity : Activity() {
     private fun render() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(background)
+            setBackgroundColor(this@WalletActivity.background)
         }
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -197,7 +197,7 @@ class WalletActivity : Activity() {
             10f, muted
         ).apply { gravity = Gravity.CENTER; setLineSpacing(dp(2).toFloat(), 1f) })
 
-        scroll.addView(body, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(body, android.view.ViewGroup.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
     }

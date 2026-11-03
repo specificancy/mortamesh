@@ -18,6 +18,7 @@ import org.bitcoindevkit.WordCount
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.runBlocking
 
 /** Bitcoin Testnet4-only adapter backed by the Bitcoin Dev Kit Android bindings. */
 internal class BitcoinTestnetWalletEngine(context: Context) {
@@ -146,7 +147,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
             syncThread = Thread({
                 try {
                     while (!Thread.currentThread().isInterrupted && !stopping.get()) {
-                        val update = client.update()
+                        val update = runBlocking { client.update() }
                         val next = synchronized(lock) {
                             val activeWallet = wallet ?: return@synchronized null
                             val activePersister = persister ?: return@synchronized null
