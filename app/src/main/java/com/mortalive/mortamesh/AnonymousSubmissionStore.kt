@@ -66,7 +66,7 @@ internal class AnonymousSubmissionStore(context: Context) {
         )
         val payloadFile = payloadFile(id)
         val metadataFile = metadataFile(id)
-        try {
+        return try {
             if (attachment != null) {
                 encryptToFile(payloadFile, id.toByteArray(Charsets.UTF_8)) { cipherOutput ->
                     FileInputStream(attachment).use { input -> input.copyTo(cipherOutput, 32 * 1024) }
