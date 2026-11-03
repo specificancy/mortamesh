@@ -3465,8 +3465,10 @@ class MainActivity : Activity() {
                 }.getOrNull() ?: return
                 if (!meshSecurity.verifyWorldPost(signed)) return
                 val nodeId = signed.optString("node")
-                val transportNode = nodeForTransport(sourcePeerId)
-                if (transportNode != null && transportNode != nodeId) return
+                // Do not accept a relay opt-in until the transport is bound to the same
+                // key-pinned logical node through the existing Mesh identity handshake.
+                val transportNode = nodeForTransport(sourcePeerId) ?: return
+                if (transportNode != nodeId) return
                 val messageId = signed.optString("id")
                 val now = System.currentTimeMillis()
                 anonymousRelayCapabilitySeen.entries.removeAll { now - it.value > 7L * 24L * 60L * 60L * 1000L }
