@@ -18,7 +18,8 @@ internal class AnonymousRelayStore(context: Context) {
         val ttl: Int,
         val totalChunks: Int,
         val receivedChunks: Int,
-        val completeFile: File?
+        val completeFile: File?,
+        val localOrigin: Boolean
     )
 
     enum class AcceptResult { STORED, COMPLETE, DUPLICATE, INVALID, QUOTA_REJECTED }
@@ -41,6 +42,7 @@ internal class AnonymousRelayStore(context: Context) {
             check(writeAtomic(File(dir, "manifest.json"), packageValue.manifest.toString().toByteArray(Charsets.UTF_8)))
             check(writeAtomic(File(dir, "state.json"), JSONObject()
                 .put("ttl", AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
+                .put("localOrigin", true)
                 .put("updatedAt", System.currentTimeMillis())
                 .toString().toByteArray(Charsets.UTF_8)))
             val temporary = File(dir, "ready.tmp")
@@ -84,7 +86,7 @@ internal class AnonymousRelayStore(context: Context) {
         if (!writeAtomic(chunkFile, frame.chunk)) return AcceptResult.QUOTA_REJECTED
 
         val previousTtl = runCatching { JSONObject(stateFile.readText()).optInt("ttl", 0) }.getOrDefault(0)
-        val savedState = JSONObject().put("ttl", maxOf(previousTtl, frame.ttl)).put("updatedAt", System.currentTimeMillis())
+        val savedState = JSONObject().put("ttl", maxOf(previousTtl, frame.ttl)).put("localOrigin", false).put("updatedAt", System.currentTimeMillis())
         if (!writeAtomic(stateFile, savedState.toString().toByteArray(Charsets.UTF_8))) {
             chunkFile.delete()
             return AcceptResult.QUOTA_REJECTED
@@ -130,12 +132,13 @@ internal class AnonymousRelayStore(context: Context) {
             if (!AnonymousSubmissionCrypto.verifyManifest(manifest)) return@mapNotNull null
             val id = manifest.optString("transferId")
             if (!isCanonicalUuid(id) || dir.name != id) return@mapNotNull null
-            val ttl = runCatching { JSONObject(stateFile.readText()).optInt("ttl", 0) }.getOrDefault(0)
-                .coerceIn(0, AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
+            val state = runCatching { JSONObject(stateFile.readText()) }.getOrDefault(JSONObject())
+            val ttl = state.optInt("ttl", 0).coerceIn(0, AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
+            val localOrigin = state.optBoolean("localOrigin", false)
             val total = kotlin.math.ceil(manifest.optLong("ciphertextBytes").toDouble() / AnonymousRelayProtocol.CHUNK_BYTES).toInt()
             val ready = File(dir, "ready.bin").takeIf { it.isFile }
             val received = if (ready != null) total else chunkFiles(dir).count { it.isFile }
-            Transfer(id, manifest, ttl, total, received, ready)
+            Transfer(id, manifest, ttl, total, received, ready, localOrigin)
         }?.sortedBy { it.id } ?: emptyList()
     }
 
