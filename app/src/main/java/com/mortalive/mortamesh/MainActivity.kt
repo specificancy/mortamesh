@@ -144,6 +144,7 @@ class MainActivity : Activity() {
     private var currentComposer: EditText? = null
     private lateinit var worldChatStore: WorldChatStore
     private lateinit var anonymousSubmissionStore: AnonymousSubmissionStore
+    private lateinit var anonymousSubmissionPackager: AnonymousSubmissionPackager
     private lateinit var anonymousRelayStore: AnonymousRelayStore
     private val anonymousRelayPeerModes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val anonymousRelayCapabilitySeen = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -297,6 +298,7 @@ class MainActivity : Activity() {
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
         anonymousSubmissionStore = AnonymousSubmissionStore(this)
+        anonymousSubmissionPackager = AnonymousSubmissionPackager(this, anonymousSubmissionStore)
         anonymousRelayStore = AnonymousRelayStore(this)
         File(cacheDir, "anonymous-source").deleteRecursively()
         privateVault = PrivateVault(this)
@@ -3375,6 +3377,29 @@ class MainActivity : Activity() {
         val targets = connectedWifiTransportIds().filter { anonymousRelayPeerModes[it] == true }
         targets.forEach { forwardStoredAnonymousTransfersTo(it) }
         return true
+    }
+
+    /**
+     * Future Mortalive integration entry point. Requires a backend-published, pinned ingestion key.
+     * This creates an encrypted package and queues it for consented nearby relays; it does not
+     * claim server upload, moderation approval, or group delivery.
+     */
+    private fun enqueueAnonymousDraftForConfiguredRelay(
+        draftId: String,
+        ingestionPublicKeyX509Base64: String,
+        ingestionKeyId: String
+    ): Boolean {
+        val draft = anonymousSubmissionStore.listDrafts().firstOrNull { it.id == draftId } ?: return false
+        val packageValue = try {
+            anonymousSubmissionPackager.prepare(draft, ingestionPublicKeyX509Base64, ingestionKeyId)
+        } catch (_: Exception) {
+            return false
+        }
+        return try {
+            queueAnonymousPackageForRelay(packageValue)
+        } finally {
+            anonymousSubmissionPackager.deletePackage(packageValue)
+        }
     }
 
     private fun onTransportLost(peerId: String) {
