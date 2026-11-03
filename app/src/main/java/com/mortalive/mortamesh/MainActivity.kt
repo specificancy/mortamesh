@@ -808,24 +808,35 @@ class MainActivity : Activity() {
         p.addView(vSpace(12))
 
         p.addView(primaryButton("Save encrypted draft on this phone") {
-            try {
-                val draft = anonymousSubmissionStore.saveDraft(
-                    anonymousGroupValue.trim(),
-                    anonymousTextValue,
-                    anonymousSelectedMime,
-                    anonymousSelectedFile
-                )
-                anonymousSelectedFile?.delete()
-                anonymousSelectedFile = null
-                anonymousSelectedMime = null
-                anonymousAttachmentInfo?.text = "No attachment selected"
-                anonymousTextValue = ""
-                Toast.makeText(this, "Encrypted draft saved · ${draft.id.take(8)}", Toast.LENGTH_LONG).show()
-                render()
-            } catch (error: IllegalArgumentException) {
-                Toast.makeText(this, error.message ?: "Check the group and attachment.", Toast.LENGTH_LONG).show()
-            } catch (error: Exception) {
-                Toast.makeText(this, error.message ?: "Could not save the encrypted draft.", Toast.LENGTH_LONG).show()
+            if (anonymousDraftSaving) return@primaryButton
+            anonymousDraftSaving = true
+            val groupId = anonymousGroupValue.trim()
+            val textValue = anonymousTextValue
+            val mime = anonymousSelectedMime
+            val selectedFile = anonymousSelectedFile
+            Toast.makeText(this, "Encrypting draft on this phone…", Toast.LENGTH_SHORT).show()
+            anonymousSubmissionExecutor.execute {
+                try {
+                    val draft = anonymousSubmissionStore.saveDraft(groupId, textValue, mime, selectedFile)
+                    selectedFile?.delete()
+                    mainHandler.post {
+                        anonymousDraftSaving = false
+                        if (anonymousSelectedFile == selectedFile) {
+                            anonymousSelectedFile = null
+                            anonymousSelectedMime = null
+                            anonymousAttachmentInfo?.text = "No attachment selected"
+                        }
+                        anonymousTextValue = ""
+                        Toast.makeText(this, "Encrypted draft saved · ${draft.id.take(8)}", Toast.LENGTH_LONG).show()
+                        if (currentScreen == Screen.ANONYMOUS_POST) render()
+                    }
+                } catch (error: Exception) {
+                    selectedFile?.let { if (!it.exists()) Unit }
+                    mainHandler.post {
+                        anonymousDraftSaving = false
+                        Toast.makeText(this, error.message ?: "Could not save the encrypted draft.", Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         })
         p.addView(vSpace(20))
