@@ -159,6 +159,18 @@ internal class AnonymousRelayStore(context: Context) {
     }
 
     @Synchronized
+    fun queuedBytes(): Long = directoryBytes(root)
+
+    @Synchronized
+    fun clearAll(): Boolean {
+        var success = true
+        root.listFiles()?.forEach { entry ->
+            if (!entry.deleteRecursively()) success = false
+        }
+        return success
+    }
+
+    @Synchronized
     fun pruneExpired() {
         val now = System.currentTimeMillis()
         root.listFiles()?.filter { it.isDirectory }?.forEach { dir ->
