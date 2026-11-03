@@ -18,6 +18,20 @@ internal object AnonymousRelayProtocol {
     const val CHUNK_BYTES = AnonymousSubmissionPolicy.RELAY_CHUNK_BYTES
     const val MAX_CHUNKS = 1_200
 
+    private val verifiedManifestCache = object : LinkedHashMap<String, Boolean>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean = size > 128
+    }
+
+    private fun verifyManifestCached(manifest: JSONObject): Boolean {
+        val fingerprint = sha256(manifest.toString().toByteArray(Charsets.UTF_8))
+        synchronized(verifiedManifestCache) {
+            if (verifiedManifestCache[fingerprint] == true) return true
+        }
+        if (!AnonymousSubmissionCrypto.verifyManifest(manifest)) return false
+        synchronized(verifiedManifestCache) { verifiedManifestCache[fingerprint] = true }
+        return true
+    }
+
     data class Frame(
         val transferId: String,
         val ttl: Int,
@@ -35,7 +49,7 @@ internal object AnonymousRelayProtocol {
         action: (String) -> Unit
     ) {
         require(ttl in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
-        require(AnonymousSubmissionCrypto.verifyManifest(manifest))
+        require(verifyManifestCached(manifest))
         require(manifest.optString("transferId") == transferId)
         require(ciphertextFile.isFile)
         require(ciphertextFile.length() == manifest.optLong("ciphertextBytes"))
@@ -100,7 +114,7 @@ internal object AnonymousRelayProtocol {
             if (!isCanonicalUuid(transferId) || ttl !in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS) return null
             if (total !in 1..MAX_CHUNKS || index !in 0 until total) return null
             val manifest = JSONObject(json.getString("manifest"))
-            if (!AnonymousSubmissionCrypto.verifyManifest(manifest) || manifest.optString("transferId") != transferId) return null
+            if (!verifyManifestCached(manifest) || manifest.optString("transferId") != transferId) return null
             val expectedTotal = ceil(manifest.optLong("ciphertextBytes").toDouble() / CHUNK_BYTES).toInt()
             if (expectedTotal != total) return null
             val start = index.toLong() * CHUNK_BYTES
