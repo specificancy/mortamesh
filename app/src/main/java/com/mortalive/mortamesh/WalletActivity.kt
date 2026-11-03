@@ -248,6 +248,8 @@ class WalletActivity : Activity() {
             .setView(message)
             .setCancelable(false)
             .setPositiveButton("I've written it down") { _, _ ->
+                // Clear the rendered secret immediately; JVM String instances are not deterministically zeroizable.
+                words.text = ""
                 syncText = "Recovery phrase saved in your offline backup"
                 render()
             }
