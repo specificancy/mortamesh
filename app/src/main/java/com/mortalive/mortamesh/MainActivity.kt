@@ -3414,11 +3414,15 @@ class MainActivity : Activity() {
     private fun forwardStoredAnonymousTransfersTo(peerId: String) {
         if (!anonymousRelayCarryEnabled() || anonymousRelayPeerModes[peerId] != true) return
         if (!peerId.startsWith(WIFI_PREFIX) || !hasPeerTransport(peerId)) return
-        anonymousRelayStore.listTransfers().forEach { transfer ->
-            val nextTtl = transfer.ttl - 1
-            if (nextTtl >= 0) {
-                anonymousRelayStore.forEachStoredFrame(transfer.id, nextTtl) { frame ->
-                    runCatching { sendTextToPeer(peerId, frame) }
+        // File reads, hashes and large chunk writes must never block the main UI thread.
+        anonymousRelayExecutor.execute {
+            if (!anonymousRelayCarryEnabled() || anonymousRelayPeerModes[peerId] != true) return@execute
+            anonymousRelayStore.listTransfers().forEach { transfer ->
+                val nextTtl = transfer.ttl - 1
+                if (nextTtl >= 0) {
+                    anonymousRelayStore.forEachStoredFrame(transfer.id, nextTtl) { frame ->
+                        runCatching { sendTextToPeer(peerId, frame) }
+                    }
                 }
             }
         }
@@ -3545,9 +3549,11 @@ class MainActivity : Activity() {
                         if (nextTtl > 0) {
                             val forwarded = AnonymousRelayProtocol.forwardWithTtl(text, nextTtl) ?: return@execute
                             mainHandler.post {
-                                connectedWifiTransportIds()
+                                val targets = connectedWifiTransportIds()
                                     .filter { it != sourcePeerId && anonymousRelayPeerModes[it] == true }
-                                    .forEach { peer -> runCatching { sendTextToPeer(peer, forwarded) } }
+                                anonymousRelayExecutor.execute {
+                                    targets.forEach { peer -> runCatching { sendTextToPeer(peer, forwarded) } }
+                                }
                             }
                         }
                     }
