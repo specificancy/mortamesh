@@ -143,6 +143,21 @@ class MainActivity : Activity() {
     private var chatScroll: ScrollView? = null
     private var currentComposer: EditText? = null
     private lateinit var worldChatStore: WorldChatStore
+    private lateinit var anonymousSubmissionStore: AnonymousSubmissionStore
+    private lateinit var anonymousSubmissionPackager: AnonymousSubmissionPackager
+    private lateinit var anonymousRelayStore: AnonymousRelayStore
+    private val anonymousRelayPeerModes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val anonymousRelayAdmissionLimiter = AnonymousRelayAdmissionLimiter()
+    private val anonymousRelayCapabilitySeen = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private var anonymousGroupValue = ""
+    private var anonymousTextValue = ""
+    private var anonymousSelectedFile: File? = null
+    private var anonymousSelectedMime: String? = null
+    private var anonymousAttachmentInfo: TextView? = null
+    private var anonymousDraftSaving = false
+    private var anonymousAttachmentImporting = false
+    private val anonymousSubmissionExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-AnonymousSubmission").apply { isDaemon = true } }
+    private val anonymousRelayExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-AnonymousRelay").apply { isDaemon = true } }
     private var worldPostColumn: LinearLayout? = null
     private var worldChatScroll: ScrollView? = null
     private var worldComposer: EditText? = null
@@ -242,13 +257,14 @@ class MainActivity : Activity() {
     private val permissionRequestCode = 901
     private val enableBluetoothRequestCode = 902
 
-    private enum class Screen { HOME, NEARBY, CHATS, VAULT, SETTINGS, CHAT, WORLD_CHAT }
+    private enum class Screen { HOME, NEARBY, CHATS, VAULT, SETTINGS, CHAT, WORLD_CHAT, ANONYMOUS_POST }
     private companion object {
         const val WIFI_PREFIX = "wifi:"
         const val MESH_PREFIX = "mesh:"
         const val MESH_ID_PREFIX = "@MORTAMESH/2/ID|"
         const val MESH_PACKET_PREFIX = "@MORTAMESH/2/PACKET|"
         const val WORLD_CHAT_PREFIX = "@MORTAMESH/2/WORLD|"
+        const val ANONYMOUS_RELAY_CAPABILITY_PREFIX = "@MORTAMESH/2/ANON_CAP|"
         const val MESH_ROUTE_TTL = 8
         const val WORLD_CHAT_TTL = 8
         const val MAX_WORLD_CHAT_FRAME_BYTES = 3500
@@ -257,6 +273,7 @@ class MainActivity : Activity() {
         const val MAX_TEXT_CHUNKS = 30
         const val REQUEST_TAKE_PHOTO = 951
         const val REQUEST_RECORD_VIDEO = 952
+        const val REQUEST_ANONYMOUS_ATTACHMENT = 953
         const val MEDIA_WIRE_PREFIX = "@MM1|"
         const val MAX_INCOMING_MEDIA_SESSIONS = 4
         const val MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER = 2
@@ -285,11 +302,16 @@ class MainActivity : Activity() {
         preferences = getSharedPreferences("morta_mesh_local", Context.MODE_PRIVATE)
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
+        anonymousSubmissionStore = AnonymousSubmissionStore(this)
+        anonymousSubmissionPackager = AnonymousSubmissionPackager(this, anonymousSubmissionStore)
+        anonymousRelayStore = AnonymousRelayStore(this)
+        File(cacheDir, "anonymous-source").deleteRecursively()
         privateVault = PrivateVault(this)
         encryptedChatStore = EncryptedChatStore(this)
         // Capture/preview temporaries are private to this app; remove leftovers from an interrupted session.
         File(cacheDir, "morta-capture").deleteRecursively()
         File(cacheDir, "morta-preview").deleteRecursively()
+        File(cacheDir, "anonymous-source").deleteRecursively()
         nickname = preferences.getString("nickname", "Morta user") ?: "Morta user"
         localNodeId = preferences.getString("node_id", null)?.takeIf { savedId ->
             try { UUID.fromString(savedId).toString() == savedId } catch (_: Exception) { false }
@@ -374,6 +396,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(meshGossipRunnable)
+        anonymousSelectedFile?.delete()
+        File(cacheDir, "anonymous-source").deleteRecursively()
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) { }
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) { }
         advertisingRequested = false
@@ -385,6 +409,8 @@ class MainActivity : Activity() {
         synchronized(incomingMediaLifecycleLock) { mediaReceiveClosing = true }
         mediaReceiveExecutor.shutdownNow()
         meshProtocolExecutor.shutdownNow()
+        anonymousSubmissionExecutor.shutdownNow()
+        anonymousRelayExecutor.shutdownNow()
         incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
         incomingMedia.clear()
         try {
@@ -512,6 +538,7 @@ class MainActivity : Activity() {
             Screen.VAULT -> buildVault()
             Screen.CHAT -> buildChat()
             Screen.WORLD_CHAT -> buildWorldChat()
+            Screen.ANONYMOUS_POST -> buildAnonymousPost()
         }
         content.addView(view, FrameLayout.LayoutParams(-1, -1))
         refreshNav()
@@ -649,6 +676,25 @@ class MainActivity : Activity() {
         worldEntry.addView(worldCopy, LinearLayout.LayoutParams(0, -2, 1f))
         worldEntry.addView(label("›", 26f, blue, true))
         p.addView(worldEntry)
+        p.addView(vSpace(10))
+        val anonymousEntry = card().apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(13), dp(13), dp(13), dp(13))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { currentScreen = Screen.ANONYMOUS_POST; render() }
+        }
+        anonymousEntry.addView(AvatarView(this, "Anon"), LinearLayout.LayoutParams(dp(48), dp(48)))
+        val anonymousCopy = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(6), 0)
+            addView(label("Anonymous group submission", 15f, ink, true))
+            addView(label("No Mortalive account · encrypted local drafts", 12f, muted).apply { setPadding(0, dp(5), 0, 0) })
+        }
+        anonymousEntry.addView(anonymousCopy, LinearLayout.LayoutParams(0, -2, 1f))
+        anonymousEntry.addView(label("›", 26f, blue, true))
+        p.addView(anonymousEntry)
         p.addView(vSpace(18))
         addSectionTitle(p, "Private conversations", "One-to-one messages remain end-to-end encrypted.")
         p.addView(vSpace(12))
@@ -683,6 +729,227 @@ class MainActivity : Activity() {
         return scrollPage(p)
     }
 
+
+    private fun buildAnonymousPost(): View {
+        val p = page()
+        addBrandHeader(p)
+        addSectionTitle(p, "Anonymous group submission", "Prepare a post for a Mortalive group without creating or signing into a Mortalive account.")
+        p.addView(vSpace(12))
+
+        val explanation = card()
+        explanation.addView(label("How this works right now", 14f, ink, true))
+        explanation.addView(label(
+            "Your text and optional photo, video, or audio attachment are encrypted and saved only on this phone. This is a private draft, not a published post. Mesh relay, moderation approval, and delivery into the destination group remain disabled until the Mortalive team supplies the ingestion endpoint, pinned encryption key, moderation result API, and group-encryption publishing contract.",
+            12f, muted
+        ).apply { setPadding(0, dp(7), 0, 0); setLineSpacing(dp(3).toFloat(), 1f) })
+        p.addView(explanation)
+        p.addView(vSpace(12))
+
+        val targetCard = card()
+        targetCard.addView(label("DESTINATION GROUP ID / SUBMISSION CODE", 10f, muted, true).apply { letterSpacing = .05f })
+        val groupInput = EditText(this).apply {
+            setText(anonymousGroupValue)
+            textSize = 14f
+            setTextColor(ink)
+            setSingleLine(true)
+            hint = "Paste the group ID or anonymous-post code"
+            inputType = InputType.TYPE_CLASS_TEXT
+            background = rounded(0xFFF9FAFC.toInt(), 12, border)
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(128))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    anonymousGroupValue = s?.toString().orEmpty()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+        }
+        targetCard.addView(groupInput, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(9) })
+        p.addView(targetCard)
+        p.addView(vSpace(10))
+
+        val contentCard = card()
+        contentCard.addView(label("POST TEXT", 10f, muted, true).apply { letterSpacing = .05f })
+        val textInput = EditText(this).apply {
+            setText(anonymousTextValue)
+            textSize = 14f
+            setTextColor(ink)
+            hint = "Add context or a message (optional when media is attached)"
+            gravity = Gravity.TOP
+            minLines = 4
+            maxLines = 7
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            background = rounded(0xFFF9FAFC.toInt(), 12, border)
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    anonymousTextValue = s?.toString().orEmpty()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+        }
+        contentCard.addView(textInput, LinearLayout.LayoutParams(-1, dp(116)).apply { topMargin = dp(9) })
+        p.addView(contentCard)
+        p.addView(vSpace(10))
+
+        val attachmentCard = card()
+        attachmentCard.addView(label("OPTIONAL ATTACHMENT", 10f, muted, true).apply { letterSpacing = .05f })
+        attachmentCard.addView(secondaryButton("Choose photo, video, or audio") { launchAnonymousAttachmentPicker() }.apply {
+            setPadding(dp(8), dp(12), dp(8), dp(9))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+        anonymousAttachmentInfo = label(
+            anonymousSelectedFile?.let { "Selected · ${it.name} · ${formatBytes(it.length())}" } ?: "No attachment selected",
+            12f, muted
+        ).apply { setPadding(0, dp(5), 0, 0) }
+        attachmentCard.addView(anonymousAttachmentInfo)
+        p.addView(attachmentCard)
+        p.addView(vSpace(12))
+
+        p.addView(primaryButton("Save encrypted draft on this phone") {
+            if (anonymousDraftSaving) return@primaryButton
+            anonymousDraftSaving = true
+            val groupId = anonymousGroupValue.trim()
+            val textValue = anonymousTextValue
+            val mime = anonymousSelectedMime
+            val selectedFile = anonymousSelectedFile
+            Toast.makeText(this, "Encrypting draft on this phone…", Toast.LENGTH_SHORT).show()
+            anonymousSubmissionExecutor.execute {
+                try {
+                    val draft = anonymousSubmissionStore.saveDraft(groupId, textValue, mime, selectedFile)
+                    selectedFile?.delete()
+                    mainHandler.post {
+                        anonymousDraftSaving = false
+                        if (anonymousSelectedFile == selectedFile) {
+                            anonymousSelectedFile = null
+                            anonymousSelectedMime = null
+                            anonymousAttachmentInfo?.text = "No attachment selected"
+                        }
+                        anonymousTextValue = ""
+                        Toast.makeText(this, "Encrypted draft saved · ${draft.id.take(8)}", Toast.LENGTH_LONG).show()
+                        if (currentScreen == Screen.ANONYMOUS_POST) render()
+                    }
+                } catch (error: Exception) {
+                    mainHandler.post {
+                        anonymousDraftSaving = false
+                        Toast.makeText(this, error.message ?: "Could not save the encrypted draft.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        })
+        p.addView(vSpace(20))
+
+        addSectionTitle(p, "Saved on this phone", "Drafts are encrypted at rest and expire automatically after 72 hours.")
+        p.addView(vSpace(8))
+        val drafts = anonymousSubmissionStore.listDrafts()
+        if (drafts.isEmpty()) {
+            val empty = card()
+            empty.addView(label("No anonymous drafts yet", 14f, ink, true))
+            empty.addView(label("Saved drafts will appear here. They are not sent to a group until the separate moderation and publishing service is connected.", 12f, muted).apply {
+                setPadding(0, dp(6), 0, 0); setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            p.addView(empty)
+        } else {
+            drafts.forEach { draft ->
+                val row = card()
+                row.addView(label("Group · ${draft.groupId}", 13f, ink, true))
+                row.addView(label(
+                    listOfNotNull(
+                        if (draft.text.isNotBlank()) "Text" else null,
+                        draft.mimeType?.substringBefore('/')?.replaceFirstChar { it.uppercase() },
+                        if (draft.hasAttachment) formatBytes(draft.attachmentBytes) else null
+                    ).joinToString(" · ") + " · ${draft.statusLabel}",
+                    11f, muted
+                ).apply { setPadding(0, dp(5), 0, dp(8)) })
+                row.addView(secondaryButton("Delete draft") {
+                    anonymousSubmissionStore.deleteDraft(draft.id)
+                    render()
+                })
+                p.addView(row)
+                p.addView(vSpace(8))
+            }
+        }
+        return scrollPage(p)
+    }
+
+    private fun launchAnonymousAttachmentPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "image/jpeg", "image/png", "image/webp",
+                "video/mp4", "video/3gpp",
+                "audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg",
+                "audio/3gpp", "audio/wav", "audio/x-wav"
+            ))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_ANONYMOUS_ATTACHMENT)
+        } catch (_: Exception) {
+            Toast.makeText(this, "No compatible file picker is available.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun importAnonymousAttachment(uri: Uri) {
+        if (anonymousAttachmentImporting) {
+            Toast.makeText(this, "An attachment is already being imported.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        anonymousAttachmentImporting = true
+        anonymousAttachmentInfo?.text = "Importing attachment…"
+        anonymousSubmissionExecutor.execute {
+            var candidate: File? = null
+            try {
+                val mime = AnonymousSubmissionPolicy.normalizeMime(contentResolver.getType(uri))
+                require(AnonymousSubmissionPolicy.isAcceptedMime(mime)) {
+                    "Choose a supported photo, video, or audio file."
+                }
+                val directory = File(cacheDir, "anonymous-source").apply { mkdirs() }
+                candidate = File(directory, UUID.randomUUID().toString() + ".tmp")
+                var total = 0L
+                val input = contentResolver.openInputStream(uri)
+                    ?: throw java.io.IOException("The selected file could not be opened.")
+                input.use { source ->
+                    FileOutputStream(candidate!!).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        while (true) {
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) {
+                                throw java.io.IOException("The attachment must be 100 MiB or smaller.")
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                        output.fd.sync()
+                    }
+                }
+                if (total <= 0L) throw java.io.IOException("The selected file is empty.")
+                val imported = candidate!!
+                mainHandler.post {
+                    anonymousAttachmentImporting = false
+                    if (currentScreen != Screen.ANONYMOUS_POST || isFinishing) {
+                        imported.delete()
+                        return@post
+                    }
+                    anonymousSelectedFile?.delete()
+                    anonymousSelectedFile = imported
+                    anonymousSelectedMime = mime
+                    anonymousAttachmentInfo?.text = "Selected · ${imported.name} · ${formatBytes(total)}"
+                }
+            } catch (error: Exception) {
+                candidate?.delete()
+                mainHandler.post {
+                    anonymousAttachmentImporting = false
+                    anonymousAttachmentInfo?.text = "No attachment selected"
+                    Toast.makeText(this, error.message ?: "Could not read the selected attachment.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
     private fun openWorldChat() {
         activeChatId = null
@@ -1061,13 +1328,50 @@ class MainActivity : Activity() {
         })
         p.addView(vSpace(12))
 
+        val relayMode = card()
+        val carryEnabled = preferences.getBoolean("anonymous_relay_carry_enabled", false)
+        relayMode.addView(label("Peer Mode · encrypted carry", 15f, ink, true))
+        relayMode.addView(label("Opt in to temporarily store and forward other people's anonymous Mortalive submissions as opaque ciphertext over Wi-Fi Direct. Sending your own submission will not require this setting. Relays do not receive the group destination or media decryption key. The queue is capped at 250 MiB / 20 transfers and expires after the package expiry (maximum 72 hours).", 12f, muted).apply {
+            setPadding(0, dp(7), 0, dp(9)); setLineSpacing(dp(3).toFloat(), 1f)
+        })
+        relayMode.addView(primaryButton(if (carryEnabled) "Pause encrypted carry" else "Enable encrypted carry") {
+            val enabled = !preferences.getBoolean("anonymous_relay_carry_enabled", false)
+            preferences.edit().putBoolean("anonymous_relay_carry_enabled", enabled).commit()
+            announceAnonymousRelayModeToPeers()
+            Toast.makeText(this, if (enabled) "Peer Mode enabled · ciphertext only" else "Peer Mode paused", Toast.LENGTH_SHORT).show()
+            render()
+        })
+        val relayCount = anonymousRelayStore.listTransfers().size
+        val relayBytes = anonymousRelayStore.queuedBytes()
+        relayMode.addView(label(
+            "$relayCount queued transfer${if (relayCount == 1) "" else "s"} · ${formatBytes(relayBytes)} stored",
+            11f, if (relayCount > 0) ink else muted, relayCount > 0
+        ).apply { setPadding(0, dp(9), 0, dp(5)) })
+        relayMode.addView(secondaryButton("Clear stored relay packages") {
+            AlertDialog.Builder(this)
+                .setTitle("Clear encrypted relay cache?")
+                .setMessage("This deletes the encrypted packages currently stored on this phone for carry-forward. It does not delete your private chats or anonymous drafts.")
+                .setNegativeButton("Keep them", null)
+                .setPositiveButton("Clear cache") { _, _ ->
+                    val cleared = anonymousRelayStore.clearAll()
+                    Toast.makeText(this, if (cleared) "Relay cache cleared" else "Some relay files could not be removed", Toast.LENGTH_LONG).show()
+                    render()
+                }
+                .show()
+        }.apply { setPadding(dp(8), dp(7), dp(8), dp(7)) })
+        relayMode.addView(label("Internet gateway upload is intentionally unavailable until Mortalive provides the ingestion API and key contract. This device is not uploading or publishing submissions yet.", 11f, muted).apply {
+            setPadding(0, dp(9), 0, 0); setLineSpacing(dp(2).toFloat(), 1f)
+        })
+        p.addView(relayMode)
+        p.addView(vSpace(12))
+
         val privacy = card()
         privacy.addView(label("Privacy by design", 15f, ink, true))
         privacy.addView(label("No sign-up is required. Chat and private media payloads are encrypted end-to-end for trusted identities. Devices can relay ciphertext over Wi-Fi Direct or Bluetooth. Fingerprints use first-contact pinning; compare them with contacts for stronger protection.", 13f, muted).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(dp(3).toFloat(), 1f) })
         p.addView(privacy)
         p.addView(vSpace(12))
         val info = card()
-        info.addView(label("Morta Mesh · Prototype 0.6.0", 14f, ink, true))
+        info.addView(label("Morta Mesh · Prototype 0.7.0", 14f, ink, true))
         info.addView(label("Offline-first Android messaging with Wi-Fi Direct and Bluetooth LE.", 12f, muted).apply { setPadding(0, dp(7), 0, 0) })
         p.addView(info)
         return scrollPage(p)
@@ -2079,7 +2383,7 @@ class MainActivity : Activity() {
             Triple(Screen.SETTINGS, "⚙", "Settings")
         )
         items.forEach { (screen, icon, title) ->
-            val selected = currentScreen == screen || ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT) && screen == Screen.CHATS)
+            val selected = currentScreen == screen || ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT || currentScreen == Screen.ANONYMOUS_POST) && screen == Screen.CHATS)
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -2170,6 +2474,13 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == enableBluetoothRequestCode && resultCode == Activity.RESULT_OK) {
             startAvailableTransports(pendingForceRescan)
+            return
+        }
+        if (requestCode == REQUEST_ANONYMOUS_ATTACHMENT) {
+            if (resultCode == Activity.RESULT_OK) {
+                val uri = data?.data
+                if (uri != null) importAnonymousAttachment(uri)
+            }
             return
         }
         if (requestCode == REQUEST_TAKE_PHOTO || requestCode == REQUEST_RECORD_VIDEO) {
@@ -3068,6 +3379,7 @@ class MainActivity : Activity() {
     private fun onTransportReady(peerId: String) {
         mainHandler.post { retryQueuedMedia() }
         if (!hasPeerTransport(peerId)) return
+        announceAnonymousRelayMode(peerId)
         val now = System.currentTimeMillis()
         val previous = transportIdentitySentAt[peerId] ?: 0L
         if (now - previous >= 8_000L) {
@@ -3081,7 +3393,74 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun anonymousRelayCarryEnabled(): Boolean =
+        preferences.getBoolean("anonymous_relay_carry_enabled", false)
+
+    private fun announceAnonymousRelayMode(peerId: String) {
+        if (!hasPeerTransport(peerId)) return
+        val enabled = if (anonymousRelayCarryEnabled()) "1" else "0"
+        val signedCapability = meshSecurity.createWorldPost(nickname, "morta-anon-relay:v1:carry=$enabled") ?: return
+        runCatching { sendTextToPeer(peerId, ANONYMOUS_RELAY_CAPABILITY_PREFIX + encodeWire(signedCapability.toString())) }
+        if (enabled == "1") forwardStoredAnonymousTransfersTo(peerId)
+    }
+
+    private fun announceAnonymousRelayModeToPeers() {
+        connectedTransportIds().forEach(::announceAnonymousRelayMode)
+    }
+
+    private fun connectedWifiTransportIds(): List<String> =
+        wifiWriters.keys.filter { it.startsWith(WIFI_PREFIX) && hasPeerTransport(it) }
+
+    /** Re-send persisted ciphertext to a newly connected peer that explicitly opted in. */
+    private fun forwardStoredAnonymousTransfersTo(peerId: String) {
+        if (anonymousRelayPeerModes[peerId] != true) return
+        if (!peerId.startsWith(WIFI_PREFIX) || !hasPeerTransport(peerId)) return
+        // File reads, hashes and large chunk writes must never block the main UI thread.
+        // Origin-owned submissions may be sent even when this phone has not opted into
+        // carrying other people's jobs. Received packages require our own Peer Mode opt-in.
+        anonymousRelayExecutor.execute {
+            if (anonymousRelayPeerModes[peerId] != true) return@execute
+            anonymousRelayStore.listTransfers().forEach { transfer ->
+                if (!anonymousRelayCarryEnabled() && !transfer.localOrigin) return@forEach
+                val nextTtl = transfer.ttl - 1
+                if (nextTtl >= 0) {
+                    anonymousRelayStore.forEachStoredFrame(transfer.id, nextTtl) { frame ->
+                        runCatching { sendTextToPeer(peerId, frame) }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Called by the future configured uploader after it seals a draft to Mortalive's pinned key. */
+    private fun queueAnonymousPackageForRelay(packageValue: AnonymousSubmissionCrypto.EncryptedPackage): Boolean {
+        if (!anonymousRelayStore.enqueueLocalPackage(packageValue)) return false
+        val targets = connectedWifiTransportIds().filter { anonymousRelayPeerModes[it] == true }
+        targets.forEach { forwardStoredAnonymousTransfersTo(it) }
+        return true
+    }
+
+    /**
+     * Future Mortalive integration entry point. Requires a backend-published, pinned ingestion key.
+     * This creates an encrypted package and queues it for consented nearby relays; it does not
+     * claim server upload, moderation approval, or group delivery.
+     */
+    internal fun enqueueAnonymousDraftForConfiguredRelay(
+        draftId: String,
+        ingestionPublicKeyX509Base64: String,
+        ingestionKeyId: String
+    ): Boolean {
+        val staged = anonymousSubmissionPackager.stageForRelay(
+            draftId, ingestionPublicKeyX509Base64, ingestionKeyId, anonymousRelayStore
+        )
+        if (!staged) return false
+        val targets = connectedWifiTransportIds().filter { anonymousRelayPeerModes[it] == true }
+        targets.forEach { forwardStoredAnonymousTransfersTo(it) }
+        return true
+    }
+
     private fun onTransportLost(peerId: String) {
+        anonymousRelayPeerModes.remove(peerId)
         transportIdentitySentAt.remove(peerId)
         transportWorldSyncSentAt.remove(peerId)
         physicalNodeByTransport.remove(peerId)
@@ -3137,6 +3516,58 @@ class MainActivity : Activity() {
     private fun handleIncomingWireText(sourcePeerId: String, text: String) {
         if (text.length > 384 * 1024) return
         when {
+            text.startsWith(ANONYMOUS_RELAY_CAPABILITY_PREFIX) -> {
+                val signed = runCatching {
+                    JSONObject(decodeWire(text.removePrefix(ANONYMOUS_RELAY_CAPABILITY_PREFIX)))
+                }.getOrNull() ?: return
+                if (!meshSecurity.verifyWorldPost(signed)) return
+                val nodeId = signed.optString("node")
+                // Do not accept a relay opt-in until the transport is bound to the same
+                // key-pinned logical node through the existing Mesh identity handshake.
+                val transportNode = nodeForTransport(sourcePeerId) ?: return
+                if (transportNode != nodeId) return
+                val messageId = signed.optString("id")
+                val now = System.currentTimeMillis()
+                anonymousRelayCapabilitySeen.entries.removeAll { now - it.value > 7L * 24L * 60L * 60L * 1000L }
+                while (anonymousRelayCapabilitySeen.size >= 512) {
+                    val oldest = anonymousRelayCapabilitySeen.minByOrNull { it.value }?.key ?: break
+                    anonymousRelayCapabilitySeen.remove(oldest)
+                }
+                if (messageId.isBlank() || anonymousRelayCapabilitySeen.putIfAbsent(messageId, now) != null) return
+                val mode = when (signed.optString("text")) {
+                    "morta-anon-relay:v1:carry=1" -> true
+                    "morta-anon-relay:v1:carry=0" -> false
+                    else -> return
+                }
+                anonymousRelayPeerModes[sourcePeerId] = mode
+                if (mode) mainHandler.post { forwardStoredAnonymousTransfersTo(sourcePeerId) }
+            }
+            text.startsWith(AnonymousRelayProtocol.PREFIX) -> meshProtocolExecutor.execute {
+                if (!preferences.getBoolean("anonymous_relay_carry_enabled", false)) return@execute
+                if (!sourcePeerId.startsWith(WIFI_PREFIX)) return@execute
+                val header = AnonymousRelayProtocol.peekHeader(text) ?: return@execute
+                if (!anonymousRelayAdmissionLimiter.allow(sourcePeerId, header.transferId, header.declaredCiphertextBytes)) return@execute
+                val incoming = AnonymousRelayProtocol.parse(text) ?: return@execute
+                when (anonymousRelayStore.acceptFrame(text)) {
+                    AnonymousRelayStore.AcceptResult.STORED,
+                    AnonymousRelayStore.AcceptResult.COMPLETE -> {
+                        val nextTtl = incoming.ttl - 1
+                        if (nextTtl > 0) {
+                            val forwarded = AnonymousRelayProtocol.forwardWithTtl(text, nextTtl) ?: return@execute
+                            mainHandler.post {
+                                val targets = connectedWifiTransportIds()
+                                    .filter { it != sourcePeerId && anonymousRelayPeerModes[it] == true }
+                                anonymousRelayExecutor.execute {
+                                    targets.forEach { peer -> runCatching { sendTextToPeer(peer, forwarded) } }
+                                }
+                            }
+                        }
+                    }
+                    AnonymousRelayStore.AcceptResult.DUPLICATE,
+                    AnonymousRelayStore.AcceptResult.INVALID,
+                    AnonymousRelayStore.AcceptResult.QUOTA_REJECTED -> Unit
+                }
+            }
             text.startsWith(MESH_ID_PREFIX) -> meshProtocolExecutor.execute {
                 val parts = text.removePrefix(MESH_ID_PREFIX).split('|', limit = 4)
                 if (parts.size != 4) return@execute
@@ -3257,6 +3688,9 @@ class MainActivity : Activity() {
             peerNames[MESH_PREFIX + nodeId] = displayName
             persistPeerNames()
             privateVault.rebindQueuedRecipient(sourcePeerId, MESH_PREFIX + nodeId)
+            // BLE can call onTransportReady before the first signed identity is exchanged.
+            // Announce relay consent again only after this direct transport is identity-bound.
+            announceAnonymousRelayMode(sourcePeerId)
         }
         val candidateHops = (advertisedHops + 1).coerceAtMost(32)
         val previous = meshRoutes[nodeId]
