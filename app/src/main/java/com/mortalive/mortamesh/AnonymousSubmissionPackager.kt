@@ -46,6 +46,25 @@ internal class AnonymousSubmissionPackager(
         }
     }
 
+    fun stageForRelay(
+        draftId: String,
+        ingestionPublicKeyX509Base64: String,
+        ingestionKeyId: String,
+        relayStore: AnonymousRelayStore
+    ): Boolean {
+        val draft = drafts.listDrafts().firstOrNull { it.id == draftId } ?: return false
+        val packageValue = try {
+            prepare(draft, ingestionPublicKeyX509Base64, ingestionKeyId)
+        } catch (_: Exception) {
+            return false
+        }
+        return try {
+            relayStore.enqueueLocalPackage(packageValue)
+        } finally {
+            deletePackage(packageValue)
+        }
+    }
+
     fun deletePackage(packageValue: AnonymousSubmissionCrypto.EncryptedPackage) {
         packageValue.ciphertextFile.delete()
     }
