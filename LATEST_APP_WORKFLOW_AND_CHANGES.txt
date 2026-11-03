@@ -223,8 +223,15 @@ NOT YET WORKING
 - No approved message is inserted into a Mortalive group DM.
 - No Mortalive account or group membership sync is implemented; the future group capability must authorize the anonymous sender.
 
-TESTING REQUIRED
-- Android unit tests and debug APK assembly through GitHub Actions.
+CURRENT CI VERIFICATION (3 NOVEMBER 2026)
+- GitHub Actions run #33 (run ID 41672142344) completed successfully on commit 5f1efa217b8663e5763e0e86d69ccbe3c4c9d012.
+- Workflow command: gradle --no-daemon clean testDebugUnitTest assembleDebug.
+- The JVM unit-test task and debug APK assembly passed.
+- Artifact: morta-mesh-debug (4,250,762 bytes), uploaded successfully; the artifact is retained by GitHub Actions until 10 November 2026.
+- Pull request #1 is open, ready for review, and not merged: https://github.com/specificancy/mortamesh/pull/1.
+- This CI result verifies build/test/assembly only. It does not replace physical-device relay tests, backend integration, or security review.
+
+TESTING STILL REQUIRED
 - Physical two-phone BLE and Wi-Fi Direct checks.
 - Physical three-or-more-phone relay tests, with each device's Peer Mode consent states varied.
 - Interrupted transfer and reconnection/resume tests.
@@ -246,7 +253,9 @@ New source files:
 - app/src/main/java/com/mortalive/mortamesh/AnonymousSubmissionPackager.kt
 - app/src/main/java/com/mortalive/mortamesh/AnonymousRelayProtocol.kt
 - app/src/main/java/com/mortalive/mortamesh/AnonymousRelayStore.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousRelayAdmissionLimiter.kt
 - app/src/test/java/com/mortalive/mortamesh/AnonymousSubmissionPolicyTest.kt
+- app/src/test/java/com/mortalive/mortamesh/AnonymousRelayAdmissionLimiterTest.kt
 
 Updated:
 - app/src/main/java/com/mortalive/mortamesh/MainActivity.kt
