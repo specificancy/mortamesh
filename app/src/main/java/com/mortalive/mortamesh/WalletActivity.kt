@@ -146,7 +146,7 @@ class WalletActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            actions.addView(primaryButton(if (syncing) "Syncing…" else "Sync testnet") { startSync() },
+            actions.addView(primaryButton(if (syncing) "Syncing…" else "Sync Testnet4") { startSync() },
                 LinearLayout.LayoutParams(0, -2, 1f))
             actions.addView(spaceHorizontal(8))
             actions.addView(secondaryButton("New address") { generateAddress() })
@@ -193,7 +193,7 @@ class WalletActivity : Activity() {
         body.addView(privacy)
         body.addView(space(14))
         body.addView(label(
-            "Morta Mesh Wallet · experimental testnet milestone · never enter a recovery phrase into a website or share it with support.",
+            "Morta Mesh Wallet · experimental Testnet4 milestone · never enter a recovery phrase into a website or share it with support.",
             10f, muted
         ).apply { gravity = Gravity.CENTER; setLineSpacing(dp(2).toFloat(), 1f) })
 

@@ -32,7 +32,7 @@ This milestone adds an independent wallet surface to Morta Mesh. It does not mod
 - Missing Keystore material or unreadable ciphertext must fail closed. The app must not silently replace a missing encryption key or overwrite a wallet file.
 - Android Keystore hardware-backed protection depends on device support; this implementation does not claim that every device has a hardware-backed key.
 - The recovery phrase is shown once at creation for the user to back up offline. Strings are immutable in the JVM, so the application minimizes their lifetime but cannot guarantee deterministic zeroization of every in-memory copy.
-- This is an experimental testnet foundation, not an audited production wallet. The app intentionally has no send flow.
+- This is an experimental Testnet4 foundation, not an audited production wallet. The app intentionally has no send flow.
 
 ## Follow-up work
 

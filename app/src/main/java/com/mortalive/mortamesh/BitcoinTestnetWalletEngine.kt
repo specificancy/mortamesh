@@ -19,7 +19,7 @@ import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Bitcoin testnet-only adapter backed by the Bitcoin Dev Kit Android bindings. */
+/** Bitcoin Testnet4-only adapter backed by the Bitcoin Dev Kit Android bindings. */
 internal class BitcoinTestnetWalletEngine(context: Context) {
     data class Snapshot(
         val balanceSats: ULong,
@@ -124,7 +124,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
     fun startSync(onUpdate: (Snapshot) -> Unit, onStatus: (String) -> Unit, onError: (String) -> Unit) {
         synchronized(lock) {
             if (syncThread?.isAlive == true) {
-                onStatus("Bitcoin testnet sync is already running")
+                onStatus("Bitcoin Testnet4 sync is already running")
                 return
             }
             val currentWallet = wallet ?: throw IllegalStateException("Open the wallet first")
@@ -141,7 +141,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
             syncNode = node
             stopping.set(false)
             node.run()
-            onStatus("Connecting to Bitcoin testnet peers")
+            onStatus("Connecting to Bitcoin Testnet4 peers")
 
             syncThread = Thread({
                 try {
@@ -158,7 +158,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
                     }
                 } catch (error: Throwable) {
                     if (!stopping.get() && !Thread.currentThread().isInterrupted) {
-                        onError(error.message ?: "Bitcoin testnet sync stopped unexpectedly")
+                        onError(error.message ?: "Bitcoin Testnet4 sync stopped unexpectedly")
                     }
                 } finally {
                     synchronized(lock) {
@@ -169,7 +169,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
                         }
                     }
                 }
-            }, "MortaMesh-Bitcoin-Testnet-Sync").apply {
+            }, "MortaMesh-Bitcoin-Testnet4-Sync").apply {
                 isDaemon = true
                 start()
             }

@@ -102,10 +102,10 @@ Known limitations: background radio behavior varies by OEM/API; media (photos ov
 
 ## Wallet foundation (0.8.0 · experimental)
 
-Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to testnet: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the Testnet4 balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
+Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to Bitcoin Testnet4: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the Testnet4 balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
 
 The Lama Coin section is intentionally a separate, not-yet-connected foundation. The uploaded Lama Coin source is a desktop Rust node/wallet rather than an Android library; it also needs its genesis, network identity and Android integration contract resolved before the app can generate Lama addresses or manage funds. Native NFTs and marketplace settlement are likewise pending native asset transaction support in the chain.
 
 Wallet activity is independent of Mortalive authentication and does not share wallet addresses, keys, balances, holdings or transaction history with Mortalive or anonymous group submissions. Any future NFT display or membership proof must be an explicit, separate opt-in.
 
-See [WALLET_ARCHITECTURE.md](WALLET_ARCHITECTURE.md) for the implemented scope, explicit limitations and follow-up engineering requirements. This is an experimental testnet foundation, not a production wallet.
+See [WALLET_ARCHITECTURE.md](WALLET_ARCHITECTURE.md) for the implemented scope, explicit limitations and follow-up engineering requirements. This is an experimental Testnet4 foundation, not a production wallet.
