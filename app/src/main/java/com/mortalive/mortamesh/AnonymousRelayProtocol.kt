@@ -84,27 +84,30 @@ internal object AnonymousRelayProtocol {
         return frame
     }
 
-    fun parse(frameText: String): Frame? = try {
-        if (!frameText.startsWith(PREFIX) || frameText.toByteArray(Charsets.UTF_8).size > MAX_FRAME_BYTES) return null
-        val json = JSONObject(frameText.removePrefix(PREFIX))
-        if (json.optInt("v") != 1) return null
-        val transferId = json.optString("id")
-        val ttl = json.optInt("ttl", -1)
-        val index = json.optInt("index", -1)
-        val total = json.optInt("total", -1)
-        if (!isCanonicalUuid(transferId) || ttl !in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS) return null
-        if (total !in 1..MAX_CHUNKS || index !in 0 until total) return null
-        val manifest = JSONObject(json.getString("manifest"))
-        if (!AnonymousSubmissionCrypto.verifyManifest(manifest) || manifest.optString("transferId") != transferId) return null
-        val expectedTotal = ceil(manifest.optLong("ciphertextBytes").toDouble() / CHUNK_BYTES).toInt()
-        if (expectedTotal != total) return null
-        val start = index.toLong() * CHUNK_BYTES
-        val expectedBytes = minOf(CHUNK_BYTES.toLong(), manifest.optLong("ciphertextBytes") - start).toInt()
-        if (expectedBytes !in 1..CHUNK_BYTES) return null
-        val chunk = Base64.getUrlDecoder().decode(json.getString("data"))
-        if (chunk.size != expectedBytes || sha256(chunk) != json.optString("chunkSha256")) return null
-        Frame(transferId, ttl, index, total, manifest, chunk)
-    } catch (_: Exception) { null }
+    fun parse(frameText: String): Frame? {
+        return try {
+            if (!frameText.startsWith(PREFIX) || frameText.toByteArray(Charsets.UTF_8).size > MAX_FRAME_BYTES) return null
+            val json = JSONObject(frameText.removePrefix(PREFIX))
+            if (json.optInt("v") != 1) return null
+            val transferId = json.optString("id")
+            val ttl = json.optInt("ttl", -1)
+            val index = json.optInt("index", -1)
+            val total = json.optInt("total", -1)
+            if (!isCanonicalUuid(transferId) || ttl !in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS) return null
+            if (total !in 1..MAX_CHUNKS || index !in 0 until total) return null
+            val manifest = JSONObject(json.getString("manifest"))
+            if (!AnonymousSubmissionCrypto.verifyManifest(manifest) || manifest.optString("transferId") != transferId) return null
+            val expectedTotal = ceil(manifest.optLong("ciphertextBytes").toDouble() / CHUNK_BYTES).toInt()
+            if (expectedTotal != total) return null
+            val start = index.toLong() * CHUNK_BYTES
+            val expectedBytes = minOf(CHUNK_BYTES.toLong(), manifest.optLong("ciphertextBytes") - start).toInt()
+            if (expectedBytes !in 1..CHUNK_BYTES) return null
+            val chunk = Base64.getUrlDecoder().decode(json.getString("data"))
+            if (chunk.size != expectedBytes || sha256(chunk) != json.optString("chunkSha256")) return null
+            Frame(transferId, ttl, index, total, manifest, chunk)
+        } catch (_: Exception) { null }
+    }
+
 
     fun forwardWithTtl(frameText: String, ttl: Int): String? {
         val parsed = parse(frameText) ?: return null
