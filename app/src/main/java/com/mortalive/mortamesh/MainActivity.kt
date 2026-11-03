@@ -153,6 +153,10 @@ class MainActivity : Activity() {
     private var anonymousSelectedFile: File? = null
     private var anonymousSelectedMime: String? = null
     private var anonymousAttachmentInfo: TextView? = null
+    private var anonymousDraftSaving = false
+    private var anonymousAttachmentImporting = false
+    private val anonymousSubmissionExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-AnonymousSubmission").apply { isDaemon = true } }
+    private val anonymousRelayExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-AnonymousRelay").apply { isDaemon = true } }
     private var worldPostColumn: LinearLayout? = null
     private var worldChatScroll: ScrollView? = null
     private var worldComposer: EditText? = null
@@ -404,6 +408,8 @@ class MainActivity : Activity() {
         synchronized(incomingMediaLifecycleLock) { mediaReceiveClosing = true }
         mediaReceiveExecutor.shutdownNow()
         meshProtocolExecutor.shutdownNow()
+        anonymousSubmissionExecutor.shutdownNow()
+        anonymousRelayExecutor.shutdownNow()
         incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
         incomingMedia.clear()
         try {
