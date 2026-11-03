@@ -358,6 +358,7 @@ class WalletActivity : Activity() {
                 runOnUiThread {
                     busy = false
                     busyText = ""
+                    walletExists = engine.hasWallet()
                     onSuccess(result)
                     render()
                 }
@@ -365,6 +366,7 @@ class WalletActivity : Activity() {
                 runOnUiThread {
                     busy = false
                     busyText = ""
+                    walletExists = engine.hasWallet()
                     errorText = error.message ?: "Wallet operation failed"
                     render()
                 }
