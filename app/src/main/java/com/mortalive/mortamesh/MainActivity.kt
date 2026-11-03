@@ -143,6 +143,12 @@ class MainActivity : Activity() {
     private var chatScroll: ScrollView? = null
     private var currentComposer: EditText? = null
     private lateinit var worldChatStore: WorldChatStore
+    private lateinit var anonymousSubmissionStore: AnonymousSubmissionStore
+    private var anonymousGroupValue = ""
+    private var anonymousTextValue = ""
+    private var anonymousSelectedFile: File? = null
+    private var anonymousSelectedMime: String? = null
+    private var anonymousAttachmentInfo: TextView? = null
     private var worldPostColumn: LinearLayout? = null
     private var worldChatScroll: ScrollView? = null
     private var worldComposer: EditText? = null
@@ -242,7 +248,7 @@ class MainActivity : Activity() {
     private val permissionRequestCode = 901
     private val enableBluetoothRequestCode = 902
 
-    private enum class Screen { HOME, NEARBY, CHATS, VAULT, SETTINGS, CHAT, WORLD_CHAT }
+    private enum class Screen { HOME, NEARBY, CHATS, VAULT, SETTINGS, CHAT, WORLD_CHAT, ANONYMOUS_POST }
     private companion object {
         const val WIFI_PREFIX = "wifi:"
         const val MESH_PREFIX = "mesh:"
@@ -257,6 +263,7 @@ class MainActivity : Activity() {
         const val MAX_TEXT_CHUNKS = 30
         const val REQUEST_TAKE_PHOTO = 951
         const val REQUEST_RECORD_VIDEO = 952
+        const val REQUEST_ANONYMOUS_ATTACHMENT = 953
         const val MEDIA_WIRE_PREFIX = "@MM1|"
         const val MAX_INCOMING_MEDIA_SESSIONS = 4
         const val MAX_INCOMING_MEDIA_SESSIONS_PER_SENDER = 2
@@ -285,6 +292,7 @@ class MainActivity : Activity() {
         preferences = getSharedPreferences("morta_mesh_local", Context.MODE_PRIVATE)
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
+        anonymousSubmissionStore = AnonymousSubmissionStore(this)
         privateVault = PrivateVault(this)
         encryptedChatStore = EncryptedChatStore(this)
         // Capture/preview temporaries are private to this app; remove leftovers from an interrupted session.
@@ -512,6 +520,7 @@ class MainActivity : Activity() {
             Screen.VAULT -> buildVault()
             Screen.CHAT -> buildChat()
             Screen.WORLD_CHAT -> buildWorldChat()
+            Screen.ANONYMOUS_POST -> buildAnonymousPost()
         }
         content.addView(view, FrameLayout.LayoutParams(-1, -1))
         refreshNav()
@@ -649,6 +658,25 @@ class MainActivity : Activity() {
         worldEntry.addView(worldCopy, LinearLayout.LayoutParams(0, -2, 1f))
         worldEntry.addView(label("›", 26f, blue, true))
         p.addView(worldEntry)
+        p.addView(vSpace(10))
+        val anonymousEntry = card().apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(13), dp(13), dp(13), dp(13))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { currentScreen = Screen.ANONYMOUS_POST; render() }
+        }
+        anonymousEntry.addView(AvatarView(this, "Anon"), LinearLayout.LayoutParams(dp(48), dp(48)))
+        val anonymousCopy = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, dp(6), 0)
+            addView(label("Anonymous group submission", 15f, ink, true))
+            addView(label("No Mortalive account · encrypted local drafts", 12f, muted).apply { setPadding(0, dp(5), 0, 0) })
+        }
+        anonymousEntry.addView(anonymousCopy, LinearLayout.LayoutParams(0, -2, 1f))
+        anonymousEntry.addView(label("›", 26f, blue, true))
+        p.addView(anonymousEntry)
         p.addView(vSpace(18))
         addSectionTitle(p, "Private conversations", "One-to-one messages remain end-to-end encrypted.")
         p.addView(vSpace(12))
@@ -683,6 +711,198 @@ class MainActivity : Activity() {
         return scrollPage(p)
     }
 
+
+    private fun buildAnonymousPost(): View {
+        val p = page()
+        addBrandHeader(p)
+        addSectionTitle(p, "Anonymous group submission", "Prepare a post for a Mortalive group without creating or signing into a Mortalive account.")
+        p.addView(vSpace(12))
+
+        val explanation = card()
+        explanation.addView(label("How this works right now", 14f, ink, true))
+        explanation.addView(label(
+            "Your text and optional photo, video, or audio attachment are encrypted and saved only on this phone. This is a private draft, not a published post. Mesh relay, moderation approval, and delivery into the destination group remain disabled until the Mortalive team supplies the ingestion endpoint, pinned encryption key, moderation result API, and group-encryption publishing contract.",
+            12f, muted
+        ).apply { setPadding(0, dp(7), 0, 0); setLineSpacing(dp(3).toFloat(), 1f) })
+        p.addView(explanation)
+        p.addView(vSpace(12))
+
+        val targetCard = card()
+        targetCard.addView(label("DESTINATION GROUP ID / SUBMISSION CODE", 10f, muted, true).apply { letterSpacing = .05f })
+        val groupInput = EditText(this).apply {
+            setText(anonymousGroupValue)
+            textSize = 14f
+            setTextColor(ink)
+            setSingleLine(true)
+            hint = "Paste the group ID or anonymous-post code"
+            inputType = InputType.TYPE_CLASS_TEXT
+            background = rounded(0xFFF9FAFC.toInt(), 12, border)
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(128))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    anonymousGroupValue = s?.toString().orEmpty()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+        }
+        targetCard.addView(groupInput, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(9) })
+        p.addView(targetCard)
+        p.addView(vSpace(10))
+
+        val contentCard = card()
+        contentCard.addView(label("POST TEXT", 10f, muted, true).apply { letterSpacing = .05f })
+        val textInput = EditText(this).apply {
+            setText(anonymousTextValue)
+            textSize = 14f
+            setTextColor(ink)
+            hint = "Add context or a message (optional when media is attached)"
+            gravity = Gravity.TOP
+            minLines = 4
+            maxLines = 7
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            background = rounded(0xFFF9FAFC.toInt(), 12, border)
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    anonymousTextValue = s?.toString().orEmpty()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) = Unit
+            })
+        }
+        contentCard.addView(textInput, LinearLayout.LayoutParams(-1, dp(116)).apply { topMargin = dp(9) })
+        p.addView(contentCard)
+        p.addView(vSpace(10))
+
+        val attachmentCard = card()
+        attachmentCard.addView(label("OPTIONAL ATTACHMENT", 10f, muted, true).apply { letterSpacing = .05f })
+        attachmentCard.addView(secondaryButton("Choose photo, video, or audio") { launchAnonymousAttachmentPicker() }.apply {
+            setPadding(dp(8), dp(12), dp(8), dp(9))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+        anonymousAttachmentInfo = label(
+            anonymousSelectedFile?.let { "Selected · ${it.name} · ${formatBytes(it.length())}" } ?: "No attachment selected",
+            12f, muted
+        ).apply { setPadding(0, dp(5), 0, 0) }
+        attachmentCard.addView(anonymousAttachmentInfo)
+        p.addView(attachmentCard)
+        p.addView(vSpace(12))
+
+        p.addView(primaryButton("Save encrypted draft on this phone") {
+            try {
+                val draft = anonymousSubmissionStore.saveDraft(
+                    anonymousGroupValue.trim(),
+                    anonymousTextValue,
+                    anonymousSelectedMime,
+                    anonymousSelectedFile
+                )
+                anonymousSelectedFile?.delete()
+                anonymousSelectedFile = null
+                anonymousSelectedMime = null
+                anonymousAttachmentInfo?.text = "No attachment selected"
+                anonymousTextValue = ""
+                Toast.makeText(this, "Encrypted draft saved · ${draft.id.take(8)}", Toast.LENGTH_LONG).show()
+                render()
+            } catch (error: IllegalArgumentException) {
+                Toast.makeText(this, error.message ?: "Check the group and attachment.", Toast.LENGTH_LONG).show()
+            } catch (error: Exception) {
+                Toast.makeText(this, error.message ?: "Could not save the encrypted draft.", Toast.LENGTH_LONG).show()
+            }
+        })
+        p.addView(vSpace(20))
+
+        addSectionTitle(p, "Saved on this phone", "Drafts are encrypted at rest and expire automatically after 72 hours.")
+        p.addView(vSpace(8))
+        val drafts = anonymousSubmissionStore.listDrafts()
+        if (drafts.isEmpty()) {
+            val empty = card()
+            empty.addView(label("No anonymous drafts yet", 14f, ink, true))
+            empty.addView(label("Saved drafts will appear here. They are not sent to a group until the separate moderation and publishing service is connected.", 12f, muted).apply {
+                setPadding(0, dp(6), 0, 0); setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            p.addView(empty)
+        } else {
+            drafts.forEach { draft ->
+                val row = card()
+                row.addView(label("Group · ${draft.groupId}", 13f, ink, true))
+                row.addView(label(
+                    listOfNotNull(
+                        if (draft.text.isNotBlank()) "Text" else null,
+                        draft.mimeType?.substringBefore('/')?.replaceFirstChar { it.uppercase() },
+                        if (draft.hasAttachment) formatBytes(draft.attachmentBytes) else null
+                    ).joinToString(" · ") + " · ${draft.statusLabel}",
+                    11f, muted
+                ).apply { setPadding(0, dp(5), 0, dp(8)) })
+                row.addView(secondaryButton("Delete draft") {
+                    anonymousSubmissionStore.deleteDraft(draft.id)
+                    render()
+                })
+                p.addView(row)
+                p.addView(vSpace(8))
+            }
+        }
+        return scrollPage(p)
+    }
+
+    private fun launchAnonymousAttachmentPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "image/jpeg", "image/png", "image/webp",
+                "video/mp4", "video/3gpp",
+                "audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg",
+                "audio/3gpp", "audio/wav", "audio/x-wav"
+            ))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_ANONYMOUS_ATTACHMENT)
+        } catch (_: Exception) {
+            Toast.makeText(this, "No compatible file picker is available.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun importAnonymousAttachment(uri: Uri): Boolean {
+        val mime = AnonymousSubmissionPolicy.normalizeMime(contentResolver.getType(uri))
+        if (!AnonymousSubmissionPolicy.isAcceptedMime(mime)) {
+            Toast.makeText(this, "Choose a supported photo, video, or audio file.", Toast.LENGTH_LONG).show()
+            return false
+        }
+        val directory = File(cacheDir, "anonymous-source").apply { mkdirs() }
+        val candidate = File(directory, UUID.randomUUID().toString() + ".tmp")
+        return try {
+            var total = 0L
+            val input = contentResolver.openInputStream(uri) ?: throw java.io.IOException("The selected file could not be opened.")
+            input.use { source ->
+                FileOutputStream(candidate).use { output ->
+                    val buffer = ByteArray(32 * 1024)
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) {
+                            throw java.io.IOException("The attachment must be 100 MiB or smaller.")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            if (total <= 0L) throw java.io.IOException("The selected file is empty.")
+            anonymousSelectedFile?.delete()
+            anonymousSelectedFile = candidate
+            anonymousSelectedMime = mime
+            anonymousAttachmentInfo?.text = "Selected · ${candidate.name} · ${formatBytes(total)}"
+            true
+        } catch (error: Exception) {
+            candidate.delete()
+            Toast.makeText(this, error.message ?: "Could not read the selected attachment.", Toast.LENGTH_LONG).show()
+            false
+        }
+    }
 
     private fun openWorldChat() {
         activeChatId = null
@@ -2079,7 +2299,7 @@ class MainActivity : Activity() {
             Triple(Screen.SETTINGS, "⚙", "Settings")
         )
         items.forEach { (screen, icon, title) ->
-            val selected = currentScreen == screen || ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT) && screen == Screen.CHATS)
+            val selected = currentScreen == screen || ((currentScreen == Screen.CHAT || currentScreen == Screen.WORLD_CHAT || currentScreen == Screen.ANONYMOUS_POST) && screen == Screen.CHATS)
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -2170,6 +2390,13 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == enableBluetoothRequestCode && resultCode == Activity.RESULT_OK) {
             startAvailableTransports(pendingForceRescan)
+            return
+        }
+        if (requestCode == REQUEST_ANONYMOUS_ATTACHMENT) {
+            if (resultCode == Activity.RESULT_OK) {
+                val uri = data?.data
+                if (uri != null) importAnonymousAttachment(uri)
+            }
             return
         }
         if (requestCode == REQUEST_TAKE_PHOTO || requestCode == REQUEST_RECORD_VIDEO) {
