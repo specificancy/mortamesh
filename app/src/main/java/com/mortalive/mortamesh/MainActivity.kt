@@ -144,6 +144,8 @@ class MainActivity : Activity() {
     private var currentComposer: EditText? = null
     private lateinit var worldChatStore: WorldChatStore
     private lateinit var anonymousSubmissionStore: AnonymousSubmissionStore
+    private lateinit var anonymousRelayStore: AnonymousRelayStore
+    private val anonymousRelayPeerModes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private var anonymousGroupValue = ""
     private var anonymousTextValue = ""
     private var anonymousSelectedFile: File? = null
@@ -255,6 +257,7 @@ class MainActivity : Activity() {
         const val MESH_ID_PREFIX = "@MORTAMESH/2/ID|"
         const val MESH_PACKET_PREFIX = "@MORTAMESH/2/PACKET|"
         const val WORLD_CHAT_PREFIX = "@MORTAMESH/2/WORLD|"
+        const val ANONYMOUS_RELAY_CAPABILITY_PREFIX = "@MORTAMESH/2/ANON_CAP|"
         const val MESH_ROUTE_TTL = 8
         const val WORLD_CHAT_TTL = 8
         const val MAX_WORLD_CHAT_FRAME_BYTES = 3500
@@ -293,11 +296,14 @@ class MainActivity : Activity() {
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
         anonymousSubmissionStore = AnonymousSubmissionStore(this)
+        anonymousRelayStore = AnonymousRelayStore(this)
+        File(cacheDir, "anonymous-source").deleteRecursively()
         privateVault = PrivateVault(this)
         encryptedChatStore = EncryptedChatStore(this)
         // Capture/preview temporaries are private to this app; remove leftovers from an interrupted session.
         File(cacheDir, "morta-capture").deleteRecursively()
         File(cacheDir, "morta-preview").deleteRecursively()
+        File(cacheDir, "anonymous-source").deleteRecursively()
         nickname = preferences.getString("nickname", "Morta user") ?: "Morta user"
         localNodeId = preferences.getString("node_id", null)?.takeIf { savedId ->
             try { UUID.fromString(savedId).toString() == savedId } catch (_: Exception) { false }
@@ -382,6 +388,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(meshGossipRunnable)
+        anonymousSelectedFile?.delete()
+        File(cacheDir, "anonymous-source").deleteRecursively()
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) { }
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) { }
         advertisingRequested = false
@@ -1279,6 +1287,25 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Display name saved", Toast.LENGTH_SHORT).show()
             render()
         })
+        p.addView(vSpace(12))
+
+        val relayMode = card()
+        val carryEnabled = preferences.getBoolean("anonymous_relay_carry_enabled", false)
+        relayMode.addView(label("Peer Mode · encrypted carry", 15f, ink, true))
+        relayMode.addView(label("Opt in to temporarily store and forward anonymous Mortalive submissions as opaque ciphertext over Wi-Fi Direct. Relays do not receive the group destination or media decryption key. The queue is capped at 250 MiB / 20 transfers and expires after the package expiry (maximum 72 hours).", 12f, muted).apply {
+            setPadding(0, dp(7), 0, dp(9)); setLineSpacing(dp(3).toFloat(), 1f)
+        })
+        relayMode.addView(primaryButton(if (carryEnabled) "Pause encrypted carry" else "Enable encrypted carry") {
+            val enabled = !preferences.getBoolean("anonymous_relay_carry_enabled", false)
+            preferences.edit().putBoolean("anonymous_relay_carry_enabled", enabled).commit()
+            announceAnonymousRelayModeToPeers()
+            Toast.makeText(this, if (enabled) "Peer Mode enabled · ciphertext only" else "Peer Mode paused", Toast.LENGTH_SHORT).show()
+            render()
+        })
+        relayMode.addView(label("Internet gateway upload: not enabled yet. It will require a separate opt-in, validated network access, and the Mortalive ingestion API.", 11f, muted).apply {
+            setPadding(0, dp(9), 0, 0); setLineSpacing(dp(2).toFloat(), 1f)
+        })
+        p.addView(relayMode)
         p.addView(vSpace(12))
 
         val privacy = card()
@@ -3295,6 +3322,7 @@ class MainActivity : Activity() {
     private fun onTransportReady(peerId: String) {
         mainHandler.post { retryQueuedMedia() }
         if (!hasPeerTransport(peerId)) return
+        announceAnonymousRelayMode(peerId)
         val now = System.currentTimeMillis()
         val previous = transportIdentitySentAt[peerId] ?: 0L
         if (now - previous >= 8_000L) {
@@ -3308,7 +3336,47 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun anonymousRelayCarryEnabled(): Boolean =
+        preferences.getBoolean("anonymous_relay_carry_enabled", false)
+
+    private fun announceAnonymousRelayMode(peerId: String) {
+        if (!hasPeerTransport(peerId)) return
+        val enabled = if (anonymousRelayCarryEnabled()) "1" else "0"
+        runCatching { sendTextToPeer(peerId, ANONYMOUS_RELAY_CAPABILITY_PREFIX + enabled) }
+        if (enabled == "1") forwardStoredAnonymousTransfersTo(peerId)
+    }
+
+    private fun announceAnonymousRelayModeToPeers() {
+        connectedTransportIds().forEach(::announceAnonymousRelayMode)
+    }
+
+    private fun connectedWifiTransportIds(): List<String> =
+        wifiWriters.keys.filter { it.startsWith(WIFI_PREFIX) && hasPeerTransport(it) }
+
+    /** Re-send persisted ciphertext to a newly connected peer that explicitly opted in. */
+    private fun forwardStoredAnonymousTransfersTo(peerId: String) {
+        if (!anonymousRelayCarryEnabled() || anonymousRelayPeerModes[peerId] != true) return
+        if (!peerId.startsWith(WIFI_PREFIX) || !hasPeerTransport(peerId)) return
+        anonymousRelayStore.listTransfers().forEach { transfer ->
+            val nextTtl = transfer.ttl - 1
+            if (nextTtl >= 0) {
+                anonymousRelayStore.forEachStoredFrame(transfer.id, nextTtl) { frame ->
+                    runCatching { sendTextToPeer(peerId, frame) }
+                }
+            }
+        }
+    }
+
+    /** Called by the future configured uploader after it seals a draft to Mortalive's pinned key. */
+    private fun queueAnonymousPackageForRelay(packageValue: AnonymousSubmissionCrypto.EncryptedPackage): Boolean {
+        if (!anonymousRelayStore.enqueueLocalPackage(packageValue)) return false
+        val targets = connectedWifiTransportIds().filter { anonymousRelayPeerModes[it] == true }
+        targets.forEach { forwardStoredAnonymousTransfersTo(it) }
+        return true
+    }
+
     private fun onTransportLost(peerId: String) {
+        anonymousRelayPeerModes.remove(peerId)
         transportIdentitySentAt.remove(peerId)
         transportWorldSyncSentAt.remove(peerId)
         physicalNodeByTransport.remove(peerId)
@@ -3364,6 +3432,35 @@ class MainActivity : Activity() {
     private fun handleIncomingWireText(sourcePeerId: String, text: String) {
         if (text.length > 384 * 1024) return
         when {
+            text.startsWith(ANONYMOUS_RELAY_CAPABILITY_PREFIX) -> {
+                val capability = text.removePrefix(ANONYMOUS_RELAY_CAPABILITY_PREFIX).trim()
+                if (capability == "1" || capability == "0") {
+                    anonymousRelayPeerModes[sourcePeerId] = capability == "1"
+                    if (capability == "1") mainHandler.post { forwardStoredAnonymousTransfersTo(sourcePeerId) }
+                }
+            }
+            text.startsWith(AnonymousRelayProtocol.PREFIX) -> meshProtocolExecutor.execute {
+                if (!preferences.getBoolean("anonymous_relay_carry_enabled", false)) return@execute
+                if (!sourcePeerId.startsWith(WIFI_PREFIX)) return@execute
+                val incoming = AnonymousRelayProtocol.parse(text) ?: return@execute
+                when (anonymousRelayStore.acceptFrame(text)) {
+                    AnonymousRelayStore.AcceptResult.STORED,
+                    AnonymousRelayStore.AcceptResult.COMPLETE -> {
+                        val nextTtl = incoming.ttl - 1
+                        if (nextTtl > 0) {
+                            val forwarded = AnonymousRelayProtocol.forwardWithTtl(text, nextTtl) ?: return@execute
+                            mainHandler.post {
+                                connectedWifiTransportIds()
+                                    .filter { it != sourcePeerId && anonymousRelayPeerModes[it] == true }
+                                    .forEach { peer -> runCatching { sendTextToPeer(peer, forwarded) } }
+                            }
+                        }
+                    }
+                    AnonymousRelayStore.AcceptResult.DUPLICATE,
+                    AnonymousRelayStore.AcceptResult.INVALID,
+                    AnonymousRelayStore.AcceptResult.QUOTA_REJECTED -> Unit
+                }
+            }
             text.startsWith(MESH_ID_PREFIX) -> meshProtocolExecutor.execute {
                 val parts = text.removePrefix(MESH_ID_PREFIX).split('|', limit = 4)
                 if (parts.size != 4) return@execute
