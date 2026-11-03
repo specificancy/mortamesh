@@ -1305,7 +1305,25 @@ class MainActivity : Activity() {
             Toast.makeText(this, if (enabled) "Peer Mode enabled · ciphertext only" else "Peer Mode paused", Toast.LENGTH_SHORT).show()
             render()
         })
-        relayMode.addView(label("Internet gateway upload: not enabled yet. It will require a separate opt-in, validated network access, and the Mortalive ingestion API.", 11f, muted).apply {
+        val relayCount = anonymousRelayStore.listTransfers().size
+        val relayBytes = anonymousRelayStore.queuedBytes()
+        relayMode.addView(label(
+            "$relayCount queued transfer${if (relayCount == 1) "" else "s"} · ${formatBytes(relayBytes)} stored",
+            11f, if (relayCount > 0) ink else muted, relayCount > 0
+        ).apply { setPadding(0, dp(9), 0, dp(5)) })
+        relayMode.addView(secondaryButton("Clear stored relay packages") {
+            AlertDialog.Builder(this)
+                .setTitle("Clear encrypted relay cache?")
+                .setMessage("This deletes the encrypted packages currently stored on this phone for carry-forward. It does not delete your private chats or anonymous drafts.")
+                .setNegativeButton("Keep them", null)
+                .setPositiveButton("Clear cache") { _, _ ->
+                    val cleared = anonymousRelayStore.clearAll()
+                    Toast.makeText(this, if (cleared) "Relay cache cleared" else "Some relay files could not be removed", Toast.LENGTH_LONG).show()
+                    render()
+                }
+                .show()
+        }.apply { setPadding(dp(8), dp(7), dp(8), dp(7)) })
+        relayMode.addView(label("Internet gateway upload is intentionally unavailable until Mortalive provides the ingestion API and key contract. This device is not uploading or publishing submissions yet.", 11f, muted).apply {
             setPadding(0, dp(9), 0, 0); setLineSpacing(dp(2).toFloat(), 1f)
         })
         p.addView(relayMode)
