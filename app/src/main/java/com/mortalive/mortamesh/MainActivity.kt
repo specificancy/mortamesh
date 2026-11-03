@@ -3445,6 +3445,10 @@ class MainActivity : Activity() {
                 val messageId = signed.optString("id")
                 val now = System.currentTimeMillis()
                 anonymousRelayCapabilitySeen.entries.removeAll { now - it.value > 7L * 24L * 60L * 60L * 1000L }
+                while (anonymousRelayCapabilitySeen.size >= 512) {
+                    val oldest = anonymousRelayCapabilitySeen.minByOrNull { it.value }?.key ?: break
+                    anonymousRelayCapabilitySeen.remove(oldest)
+                }
                 if (messageId.isBlank() || anonymousRelayCapabilitySeen.putIfAbsent(messageId, now) != null) return
                 val mode = when (signed.optString("text")) {
                     "morta-anon-relay:v1:carry=1" -> true
