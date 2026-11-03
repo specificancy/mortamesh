@@ -3413,12 +3413,15 @@ class MainActivity : Activity() {
 
     /** Re-send persisted ciphertext to a newly connected peer that explicitly opted in. */
     private fun forwardStoredAnonymousTransfersTo(peerId: String) {
-        if (!anonymousRelayCarryEnabled() || anonymousRelayPeerModes[peerId] != true) return
+        if (anonymousRelayPeerModes[peerId] != true) return
         if (!peerId.startsWith(WIFI_PREFIX) || !hasPeerTransport(peerId)) return
         // File reads, hashes and large chunk writes must never block the main UI thread.
+        // Origin-owned submissions may be sent even when this phone has not opted into
+        // carrying other people's jobs. Received packages require our own Peer Mode opt-in.
         anonymousRelayExecutor.execute {
-            if (!anonymousRelayCarryEnabled() || anonymousRelayPeerModes[peerId] != true) return@execute
+            if (anonymousRelayPeerModes[peerId] != true) return@execute
             anonymousRelayStore.listTransfers().forEach { transfer ->
+                if (!anonymousRelayCarryEnabled() && !transfer.localOrigin) return@forEach
                 val nextTtl = transfer.ttl - 1
                 if (nextTtl >= 0) {
                     anonymousRelayStore.forEachStoredFrame(transfer.id, nextTtl) { frame ->
