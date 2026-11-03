@@ -31,8 +31,8 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
     private val secretVault = WalletSecretVault(appContext)
     private val metadata = appContext.getSharedPreferences("wallet_public_metadata_v1", Context.MODE_PRIVATE)
     private val walletId = "primary"
-    private val networkId = "bitcoin_testnet"
-    private val walletDirectory = File(appContext.noBackupFilesDir, "bitcoin-testnet-wallet")
+    private val networkId = "bitcoin_testnet4"
+    private val walletDirectory = File(appContext.noBackupFilesDir, "bitcoin-testnet4-wallet")
     private val databaseFile = File(walletDirectory, "bdk-wallet.sqlite3")
     private val syncDirectory = File(walletDirectory, "peer-sync")
 
@@ -47,7 +47,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
     fun hasWallet(): Boolean = secretVault.exists(walletId, networkId)
 
     fun createNewTestnetWallet(): String {
-        check(!hasWallet()) { "A Bitcoin testnet wallet already exists on this device" }
+        check(!hasWallet()) { "A Bitcoin Testnet4 wallet already exists on this device" }
         check(!databaseFile.exists()) {
             "A wallet database exists without its encrypted recovery material. It was preserved."
         }
@@ -64,7 +64,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
     }
 
     fun restoreTestnetWallet(recoveryPhrase: String) {
-        check(!hasWallet()) { "A Bitcoin testnet wallet already exists on this device" }
+        check(!hasWallet()) { "A Bitcoin Testnet4 wallet already exists on this device" }
         check(!databaseFile.exists()) {
             "A wallet database exists without its encrypted recovery material. It was preserved."
         }
@@ -82,7 +82,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
 
     fun openExistingWallet(): Snapshot {
         val secret = secretVault.load(walletId, networkId)
-            ?: throw IllegalStateException("No Bitcoin testnet wallet is configured")
+            ?: throw IllegalStateException("No Bitcoin Testnet4 wallet is configured")
         val phrase = try {
             String(secret, StandardCharsets.UTF_8)
         } finally {
@@ -102,16 +102,16 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
         val currentPersister = persister ?: throw IllegalStateException("Wallet storage is unavailable")
         val address = currentWallet.revealNextAddress(KeychainKind.EXTERNAL).address.toString()
         currentWallet.persist(currentPersister)
-        metadata.edit().putString("btc_testnet_receive_address", address).commit()
+        metadata.edit().putString("btc_testnet4_receive_address", address).commit()
         address
     }
 
     fun snapshot(): Snapshot = synchronized(lock) {
         val currentWallet = wallet ?: throw IllegalStateException("Open the wallet first")
         val currentPersister = persister ?: throw IllegalStateException("Wallet storage is unavailable")
-        val currentAddress = metadata.getString("btc_testnet_receive_address", null)
+        val currentAddress = metadata.getString("btc_testnet4_receive_address", null)
             ?: currentWallet.revealNextAddress(KeychainKind.EXTERNAL).address.toString().also {
-                metadata.edit().putString("btc_testnet_receive_address", it).commit()
+                metadata.edit().putString("btc_testnet4_receive_address", it).commit()
                 currentWallet.persist(currentPersister)
             }
         Snapshot(
@@ -216,7 +216,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
             BdkWallet(
                 descriptor = externalDescriptor,
                 changeDescriptor = changeDescriptor,
-                network = Network.TESTNET,
+                network = Network.TESTNET4,
                 persister = newPersister
             )
         }
@@ -224,10 +224,10 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
         synchronized(lock) {
             persister = newPersister
             wallet = restoredWallet
-            if (metadata.getString("btc_testnet_receive_address", null).isNullOrBlank()) {
+            if (metadata.getString("btc_testnet4_receive_address", null).isNullOrBlank()) {
                 val address = restoredWallet.revealNextAddress(KeychainKind.EXTERNAL).address.toString()
-                check(metadata.edit().putString("btc_testnet_receive_address", address).commit()) {
-                    "Could not save the Bitcoin testnet receive address"
+                check(metadata.edit().putString("btc_testnet4_receive_address", address).commit()) {
+                    "Could not save the Bitcoin Testnet4 receive address"
                 }
                 restoredWallet.persist(newPersister)
             }

@@ -19,7 +19,7 @@ import android.graphics.drawable.GradientDrawable
 import java.util.Locale
 import java.util.concurrent.Executors
 
-/** Independent testnet wallet surface with no Mortalive account or group-session dependency. */
+/** Independent Testnet4 wallet surface with no Mortalive account or group-session dependency. */
 class WalletActivity : Activity() {
     private val blue = 0xFF1877F2.toInt()
     private val paleBlue = 0xFFEAF2FF.toInt()
@@ -105,14 +105,14 @@ class WalletActivity : Activity() {
 
         val bitcoin = card()
         bitcoin.addView(label("BITCOIN", 10f, muted, true))
-        bitcoin.addView(label("Bitcoin · Testnet", 20f, ink, true).apply { setPadding(0, dp(5), 0, 0) })
+        bitcoin.addView(label("Bitcoin · Testnet4", 20f, ink, true).apply { setPadding(0, dp(5), 0, 0) })
         bitcoin.addView(label(
             "Test coins only. This first milestone cannot receive or spend real BTC.",
             12f, muted
         ).apply { setPadding(0, dp(6), 0, dp(12)); setLineSpacing(dp(2).toFloat(), 1f) })
 
         if (!walletReady && !walletExists) {
-            bitcoin.addView(primaryButton("Create testnet wallet") { createWallet() })
+            bitcoin.addView(primaryButton("Create Testnet4 wallet") { createWallet() })
             bitcoin.addView(space(8))
             bitcoin.addView(secondaryButton("Restore from 12-word phrase") { showRestoreDialog() })
         } else if (!walletReady) {
@@ -139,7 +139,7 @@ class WalletActivity : Activity() {
                 setLineSpacing(dp(2).toFloat(), 1f)
             })
             addressCard.addView(space(7))
-            addressCard.addView(secondaryButton("Copy testnet address") { copyAddress() })
+            addressCard.addView(secondaryButton("Copy Testnet4 address") { copyAddress() })
             bitcoin.addView(addressCard)
             bitcoin.addView(space(12))
             val actions = LinearLayout(this).apply {
@@ -203,18 +203,18 @@ class WalletActivity : Activity() {
     }
 
     private fun openSavedWallet() {
-        runWalletTask("Opening encrypted Bitcoin testnet wallet", {
+        runWalletTask("Opening encrypted Bitcoin Testnet4 wallet", {
             engine.openExistingWallet()
         }) { loaded ->
             walletReady = true
             snapshot = loaded
             receiveAddress = loaded.receiveAddress
-            syncText = "Wallet ready · Bitcoin testnet"
+            syncText = "Wallet ready · Bitcoin Testnet4"
         }
     }
 
     private fun createWallet() {
-        runWalletTask("Creating encrypted Bitcoin testnet wallet", {
+        runWalletTask("Creating encrypted Bitcoin Testnet4 wallet", {
             engine.createNewTestnetWallet()
         }) { phrase ->
             walletReady = true
@@ -238,7 +238,7 @@ class WalletActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
             addView(label(
-                "Write these 12 words down in order and keep them offline. Anyone with these words can control this testnet wallet. Morta Mesh does not send them to a server.",
+                "Write these 12 words down in order and keep them offline. Anyone with these words can control this Testnet4 wallet. Morta Mesh does not send them to a server.",
                 13f, muted
             ).apply { setLineSpacing(dp(3).toFloat(), 1f); setPadding(0, 0, 0, dp(14)) })
             addView(words)
@@ -273,7 +273,7 @@ class WalletActivity : Activity() {
             addView(input)
         }
         AlertDialog.Builder(this)
-            .setTitle("Restore Bitcoin testnet wallet")
+            .setTitle("Restore Bitcoin Testnet4 wallet")
             .setView(box)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Restore") { _, _ ->
@@ -286,14 +286,14 @@ class WalletActivity : Activity() {
                     walletReady = true
                     snapshot = restored
                     receiveAddress = restored.receiveAddress
-                    syncText = "Wallet restored · testnet"
+                    syncText = "Wallet restored · Testnet4"
                 }
             }
             .show()
     }
 
     private fun generateAddress() {
-        runWalletTask("Generating a fresh testnet receive address", {
+        runWalletTask("Generating a fresh Testnet4 receive address", {
             engine.newReceiveAddress()
         }) { address ->
             receiveAddress = address
@@ -305,7 +305,7 @@ class WalletActivity : Activity() {
     private fun startSync() {
         if (syncing || busy) return
         syncing = true
-        syncText = "Connecting to Bitcoin testnet peers…"
+        syncText = "Connecting to Bitcoin Testnet4 peers…"
         render()
         try {
             engine.startSync(
@@ -342,7 +342,7 @@ class WalletActivity : Activity() {
         val address = receiveAddress.ifBlank { snapshot?.receiveAddress.orEmpty() }
         if (address.isBlank()) return
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Bitcoin testnet receive address", address))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Bitcoin Testnet4 receive address", address))
         Toast.makeText(this, "Testnet address copied", Toast.LENGTH_SHORT).show()
     }
 

@@ -1,6 +1,6 @@
 # Morta Mesh for Android
 
-Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.8.0 / core protocol v2 with anonymous submissions and an isolated wallet foundation**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, an encrypted Private Vault, and a separate wallet entry. The first wallet milestone is Bitcoin testnet-only; Lama Coin and native NFTs are clearly marked as not yet connected. It has no sign-up and no central messaging server for its mesh messaging.
+Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.8.0 / core protocol v2 with anonymous submissions and an isolated wallet foundation**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, an encrypted Private Vault, and a separate wallet entry. The first wallet milestone is Bitcoin Testnet4-only; Lama Coin and native NFTs are clearly marked as not yet connected. It has no sign-up and no central messaging server for its mesh messaging.
 
 The Android manifest includes `INTERNET` permission for the app's **local Wi-Fi Direct TCP sockets**. This allows directly connected phones to exchange data over their local link; it is not used to connect to a central messaging server.
 
@@ -102,7 +102,7 @@ Known limitations: background radio behavior varies by OEM/API; media (photos ov
 
 ## Wallet foundation (0.8.0 · experimental)
 
-Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to testnet: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the testnet balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
+Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to testnet: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the Testnet4 balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
 
 The Lama Coin section is intentionally a separate, not-yet-connected foundation. The uploaded Lama Coin source is a desktop Rust node/wallet rather than an Android library; it also needs its genesis, network identity and Android integration contract resolved before the app can generate Lama addresses or manage funds. Native NFTs and marketplace settlement are likewise pending native asset transaction support in the chain.
 
