@@ -1335,7 +1335,7 @@ class MainActivity : Activity() {
         p.addView(privacy)
         p.addView(vSpace(12))
         val info = card()
-        info.addView(label("Morta Mesh · Prototype 0.6.0", 14f, ink, true))
+        info.addView(label("Morta Mesh · Prototype 0.7.0", 14f, ink, true))
         info.addView(label("Offline-first Android messaging with Wi-Fi Direct and Bluetooth LE.", 12f, muted).apply { setPadding(0, dp(7), 0, 0) })
         p.addView(info)
         return scrollPage(p)
@@ -3402,22 +3402,18 @@ class MainActivity : Activity() {
      * This creates an encrypted package and queues it for consented nearby relays; it does not
      * claim server upload, moderation approval, or group delivery.
      */
-    private fun enqueueAnonymousDraftForConfiguredRelay(
+    internal fun enqueueAnonymousDraftForConfiguredRelay(
         draftId: String,
         ingestionPublicKeyX509Base64: String,
         ingestionKeyId: String
     ): Boolean {
-        val draft = anonymousSubmissionStore.listDrafts().firstOrNull { it.id == draftId } ?: return false
-        val packageValue = try {
-            anonymousSubmissionPackager.prepare(draft, ingestionPublicKeyX509Base64, ingestionKeyId)
-        } catch (_: Exception) {
-            return false
-        }
-        return try {
-            queueAnonymousPackageForRelay(packageValue)
-        } finally {
-            anonymousSubmissionPackager.deletePackage(packageValue)
-        }
+        val staged = anonymousSubmissionPackager.stageForRelay(
+            draftId, ingestionPublicKeyX509Base64, ingestionKeyId, anonymousRelayStore
+        )
+        if (!staged) return false
+        val targets = connectedWifiTransportIds().filter { anonymousRelayPeerModes[it] == true }
+        targets.forEach { forwardStoredAnonymousTransfersTo(it) }
+        return true
     }
 
     private fun onTransportLost(peerId: String) {
