@@ -147,6 +147,7 @@ class MainActivity : Activity() {
     private lateinit var anonymousSubmissionPackager: AnonymousSubmissionPackager
     private lateinit var anonymousRelayStore: AnonymousRelayStore
     private val anonymousRelayPeerModes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val anonymousRelayAdmissionLimiter = AnonymousRelayAdmissionLimiter()
     private val anonymousRelayCapabilitySeen = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var anonymousGroupValue = ""
     private var anonymousTextValue = ""
@@ -3542,6 +3543,8 @@ class MainActivity : Activity() {
                 if (!preferences.getBoolean("anonymous_relay_carry_enabled", false)) return@execute
                 if (!sourcePeerId.startsWith(WIFI_PREFIX)) return@execute
                 val incoming = AnonymousRelayProtocol.parse(text) ?: return@execute
+                val declaredBytes = incoming.manifest.optLong("ciphertextBytes", -1L)
+                if (!anonymousRelayAdmissionLimiter.allow(sourcePeerId, incoming.transferId, declaredBytes)) return@execute
                 when (anonymousRelayStore.acceptFrame(text)) {
                     AnonymousRelayStore.AcceptResult.STORED,
                     AnonymousRelayStore.AcceptResult.COMPLETE -> {
