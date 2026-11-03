@@ -26,6 +26,36 @@ internal class AnonymousRelayStore(context: Context) {
     private val root = File(context.applicationContext.filesDir, "anonymous_relay_queue").apply { mkdirs() }
 
     @Synchronized
+    fun enqueueLocalPackage(packageValue: AnonymousSubmissionCrypto.EncryptedPackage): Boolean {
+        if (!AnonymousSubmissionCrypto.verifyManifest(packageValue.manifest) ||
+            packageValue.manifest.optString("transferId") != packageValue.transferId ||
+            !packageValue.ciphertextFile.isFile ||
+            packageValue.ciphertextFile.length() != packageValue.manifest.optLong("ciphertextBytes") ||
+            AnonymousRelayProtocol.sha256(packageValue.ciphertextFile) != packageValue.manifest.optString("ciphertextSha256")) return false
+        pruneExpired()
+        if (listTransfers().size >= MAX_TRANSFERS) return false
+        if (directoryBytes(root) + packageValue.ciphertextFile.length() > MAX_BYTES) return false
+        val dir = transferDir(packageValue.transferId)
+        if (!dir.mkdirs()) return false
+        return try {
+            check(writeAtomic(File(dir, "manifest.json"), packageValue.manifest.toString().toByteArray(Charsets.UTF_8)))
+            check(writeAtomic(File(dir, "state.json"), JSONObject()
+                .put("ttl", AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
+                .put("updatedAt", System.currentTimeMillis())
+                .toString().toByteArray(Charsets.UTF_8)))
+            val temporary = File(dir, "ready.tmp")
+            FileInputStream(packageValue.ciphertextFile).use { input ->
+                FileOutputStream(temporary).use { output -> input.copyTo(output, 64 * 1024); output.fd.sync() }
+            }
+            check(temporary.renameTo(File(dir, "ready.bin")))
+            true
+        } catch (_: Exception) {
+            dir.deleteRecursively()
+            false
+        }
+    }
+
+    @Synchronized
     fun acceptFrame(text: String): AcceptResult {
         val frame = AnonymousRelayProtocol.parse(text) ?: return AcceptResult.INVALID
         pruneExpired()
