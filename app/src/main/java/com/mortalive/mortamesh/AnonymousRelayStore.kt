@@ -79,7 +79,7 @@ internal class AnonymousRelayStore(context: Context) {
                 return AcceptResult.INVALID
             }
         }
-        if (chunkFile.exists()) return AcceptResult.DUPLICATE
+        if (File(dir, "ready.bin").isFile || chunkFile.exists()) return AcceptResult.DUPLICATE
         if (directoryBytes(root) + frame.chunk.size > MAX_BYTES) return AcceptResult.QUOTA_REJECTED
         if (!writeAtomic(chunkFile, frame.chunk)) return AcceptResult.QUOTA_REJECTED
 
