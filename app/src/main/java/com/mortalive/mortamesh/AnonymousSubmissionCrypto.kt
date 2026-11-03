@@ -1,5 +1,6 @@
 package com.mortalive.mortamesh
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataOutputStream
 import java.io.File
@@ -82,8 +83,7 @@ internal object AnonymousSubmissionCrypto {
             val payloadIv = payloadCipher.iv
             payloadCipher.updateAAD(payloadAad(transferId, mime, createdAt))
             FileOutputStream(temporary).use { raw ->
-                CipherOutputStream(raw, payloadCipher).use { encrypted ->
-                    DataOutputStream(encrypted).use { payload ->
+                DataOutputStream(CipherOutputStream(raw, payloadCipher)).use { payload ->
                         val textBytes = text.toByteArray(Charsets.UTF_8)
                         val groupBytes = groupId.toByteArray(Charsets.UTF_8)
                         payload.writeInt(groupBytes.size)
@@ -94,11 +94,11 @@ internal object AnonymousSubmissionCrypto {
                         if (attachment != null) {
                             FileInputStream(attachment).use { input -> input.copyTo(payload, 32 * 1024) }
                         }
-                    }
                 }
             }
             check(temporary.renameTo(outputFile)) { "Could not finalize the encrypted package." }
 
+            val chunkHashes = chunkSha256s(outputFile)
             val manifest = JSONObject()
                 .put("v", 1)
                 .put("transferId", transferId)
@@ -119,6 +119,9 @@ internal object AnonymousSubmissionCrypto {
                 .put("payloadIv", b64(payloadIv))
                 .put("ciphertextBytes", outputFile.length())
                 .put("ciphertextSha256", sha256(outputFile))
+                .put("chunkSize", AnonymousRelayProtocol.CHUNK_BYTES)
+                .put("chunkCount", chunkHashes.size)
+                .put("chunkSha256s", JSONArray(chunkHashes))
                 .put("anonymousOriginPublicKey", b64(originKeyPair.public.encoded))
                 .put("senderIdentity", "ephemeral-per-submission")
             val signature = Signature.getInstance("SHA256withECDSA").run {
@@ -155,8 +158,17 @@ internal object AnonymousSubmissionCrypto {
             if (attachmentBytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) return false
             if ((contentType == "text/plain") != (attachmentBytes == 0L)) return false
             if (textCodePoints !in 0..AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS) return false
-            if (manifest.optLong("ciphertextBytes", -1L) !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
+            val ciphertextBytes = manifest.optLong("ciphertextBytes", -1L)
+            if (ciphertextBytes !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
             if (!manifest.optString("ciphertextSha256").matches(Regex("^[a-f0-9]{64}$"))) return false
+            if (manifest.optInt("chunkSize", -1) != AnonymousRelayProtocol.CHUNK_BYTES) return false
+            val expectedChunkCount = kotlin.math.ceil(ciphertextBytes.toDouble() / AnonymousRelayProtocol.CHUNK_BYTES).toInt()
+            if (expectedChunkCount !in 1..AnonymousRelayProtocol.MAX_CHUNKS || manifest.optInt("chunkCount", -1) != expectedChunkCount) return false
+            val chunkHashes = manifest.optJSONArray("chunkSha256s") ?: return false
+            if (chunkHashes.length() != expectedChunkCount) return false
+            for (index in 0 until chunkHashes.length()) {
+                if (!chunkHashes.optString(index).matches(Regex("^[a-f0-9]{64}$"))) return false
+            }
             if (manifest.optString("ingestionKeyId").isBlank()) return false
             val publicEncoded = manifest.getString("anonymousOriginPublicKey")
             val signatureEncoded = manifest.getString("originSignature")
@@ -245,6 +257,26 @@ internal object AnonymousSubmissionCrypto {
     private fun newEcKeyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply {
         initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
     }.generateKeyPair()
+
+    private fun chunkSha256s(file: File): List<String> {
+        val hashes = ArrayList<String>()
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(AnonymousRelayProtocol.CHUNK_BYTES)
+            while (true) {
+                var offset = 0
+                while (offset < buffer.size) {
+                    val count = input.read(buffer, offset, buffer.size - offset)
+                    if (count < 0) break
+                    offset += count
+                }
+                if (offset == 0) break
+                hashes += MessageDigest.getInstance("SHA-256").digest(buffer.copyOf(offset))
+                    .joinToString("") { "%02x".format(it) }
+                if (offset < buffer.size) break
+            }
+        }
+        return hashes
+    }
 
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
