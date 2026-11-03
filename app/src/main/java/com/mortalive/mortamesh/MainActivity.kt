@@ -3641,6 +3641,9 @@ class MainActivity : Activity() {
             peerNames[MESH_PREFIX + nodeId] = displayName
             persistPeerNames()
             privateVault.rebindQueuedRecipient(sourcePeerId, MESH_PREFIX + nodeId)
+            // BLE can call onTransportReady before the first signed identity is exchanged.
+            // Announce relay consent again only after this direct transport is identity-bound.
+            announceAnonymousRelayMode(sourcePeerId)
         }
         val candidateHops = (advertisedHops + 1).coerceAtMost(32)
         val previous = meshRoutes[nodeId]
