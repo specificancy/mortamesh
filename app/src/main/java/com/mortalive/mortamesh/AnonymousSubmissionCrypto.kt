@@ -139,33 +139,36 @@ internal object AnonymousSubmissionCrypto {
         }
     }
 
-    fun verifyManifest(manifest: JSONObject): Boolean = try {
-        if (manifest.optInt("v") != 1) return false
-        val transferId = manifest.optString("transferId")
-        val contentType = manifest.optString("contentType")
-        val expiresAt = manifest.optLong("expiresAt", -1L)
-        if (!isCanonicalUuid(transferId) || manifest.optString("destinationType") != "mort-alive-group") return false
-        val createdAt = manifest.optLong("createdAt", -1L)
-        val attachmentBytes = manifest.optLong("attachmentBytes", -1L)
-        val textCodePoints = manifest.optInt("textCodePoints", -1)
-        if (contentType != "text/plain" && !AnonymousSubmissionPolicy.isAcceptedMime(contentType)) return false
-        if (createdAt <= 0L || createdAt > System.currentTimeMillis() + 5L * 60L * 1000L) return false
-        if (expiresAt <= System.currentTimeMillis() || expiresAt - createdAt !in 1L..AnonymousSubmissionPolicy.RETENTION_MS) return false
-        if (attachmentBytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) return false
-        if ((contentType == "text/plain") != (attachmentBytes == 0L)) return false
-        if (textCodePoints !in 0..AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS) return false
-        if (manifest.optLong("ciphertextBytes", -1L) !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
-        if (!manifest.optString("ciphertextSha256").matches(Regex("^[a-f0-9]{64}$"))) return false
-        if (manifest.optString("ingestionKeyId").isBlank()) return false
-        val publicEncoded = manifest.getString("anonymousOriginPublicKey")
-        val signatureEncoded = manifest.getString("originSignature")
-        val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(publicEncoded)))
-        Signature.getInstance("SHA256withECDSA").run {
-            initVerify(publicKey)
-            update(canonicalManifest(manifest))
-            verify(unb64(signatureEncoded))
-        }
-    } catch (_: Exception) { false }
+    fun verifyManifest(manifest: JSONObject): Boolean {
+        return try {
+            if (manifest.optInt("v") != 1) return false
+            val transferId = manifest.optString("transferId")
+            val contentType = manifest.optString("contentType")
+            val expiresAt = manifest.optLong("expiresAt", -1L)
+            if (!isCanonicalUuid(transferId) || manifest.optString("destinationType") != "mort-alive-group") return false
+            val createdAt = manifest.optLong("createdAt", -1L)
+            val attachmentBytes = manifest.optLong("attachmentBytes", -1L)
+            val textCodePoints = manifest.optInt("textCodePoints", -1)
+            if (contentType != "text/plain" && !AnonymousSubmissionPolicy.isAcceptedMime(contentType)) return false
+            if (createdAt <= 0L || createdAt > System.currentTimeMillis() + 5L * 60L * 1000L) return false
+            if (expiresAt <= System.currentTimeMillis() || expiresAt - createdAt !in 1L..AnonymousSubmissionPolicy.RETENTION_MS) return false
+            if (attachmentBytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) return false
+            if ((contentType == "text/plain") != (attachmentBytes == 0L)) return false
+            if (textCodePoints !in 0..AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS) return false
+            if (manifest.optLong("ciphertextBytes", -1L) !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
+            if (!manifest.optString("ciphertextSha256").matches(Regex("^[a-f0-9]{64}$"))) return false
+            if (manifest.optString("ingestionKeyId").isBlank()) return false
+            val publicEncoded = manifest.getString("anonymousOriginPublicKey")
+            val signatureEncoded = manifest.getString("originSignature")
+            val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(publicEncoded)))
+            Signature.getInstance("SHA256withECDSA").run {
+                initVerify(publicKey)
+                update(canonicalManifest(manifest))
+                verify(unb64(signatureEncoded))
+            }
+        } catch (_: Exception) { false }
+    }
+
 
     private fun decodeRecipientKey(value: String): PublicKey {
         val encoded = runCatching { unb64(value.trim()) }.getOrElse {
