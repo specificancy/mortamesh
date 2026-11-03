@@ -157,21 +157,24 @@ internal class AnonymousSubmissionStore(context: Context) {
         listDrafts()
     }
 
-    private fun parseDraft(value: JSONObject): AnonymousSubmissionDraft? = try {
-        if (value.optInt("v") != 1) return null
-        val id = value.getString("id")
-        val group = value.getString("group")
-        val text = value.optString("text")
-        val mime = value.optString("mime").takeIf { it.isNotBlank() }
-        val bytes = value.optLong("bytes", -1L)
-        val created = value.getLong("created")
-        val expires = value.getLong("expires")
-        if (!isCanonicalUuid(id) || !AnonymousSubmissionPolicy.isValidGroupId(group) ||
-            !AnonymousSubmissionPolicy.isValidText(text) || bytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES ||
-            (bytes > 0L && !AnonymousSubmissionPolicy.isAcceptedMime(mime)) ||
-            (bytes == 0L && !mime.isNullOrBlank()) || expires <= created) null
-        else AnonymousSubmissionDraft(id, group, text, mime, bytes, created, expires)
-    } catch (_: Exception) { null }
+    private fun parseDraft(value: JSONObject): AnonymousSubmissionDraft? {
+        return try {
+            if (value.optInt("v") != 1) return null
+            val id = value.getString("id")
+            val group = value.getString("group")
+            val text = value.optString("text")
+            val mime = value.optString("mime").takeIf { it.isNotBlank() }
+            val bytes = value.optLong("bytes", -1L)
+            val created = value.getLong("created")
+            val expires = value.getLong("expires")
+            if (!isCanonicalUuid(id) || !AnonymousSubmissionPolicy.isValidGroupId(group) ||
+                !AnonymousSubmissionPolicy.isValidText(text) || bytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES ||
+                (bytes > 0L && !AnonymousSubmissionPolicy.isAcceptedMime(mime)) ||
+                (bytes == 0L && !mime.isNullOrBlank()) || expires <= created) null
+            else AnonymousSubmissionDraft(id, group, text, mime, bytes, created, expires)
+        } catch (_: Exception) { null }
+    }
+
 
     private fun encryptToFile(target: File, aad: ByteArray, writePlaintext: (java.io.OutputStream) -> Unit) {
         val temporary = File(target.parentFile, target.name + ".tmp")
