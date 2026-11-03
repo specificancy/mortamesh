@@ -13,6 +13,7 @@ import java.security.MessageDigest
 import java.security.PublicKey
 import java.security.SecureRandom
 import java.security.Signature
+import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
@@ -84,16 +85,16 @@ internal object AnonymousSubmissionCrypto {
             payloadCipher.updateAAD(payloadAad(transferId, mime, createdAt))
             FileOutputStream(temporary).use { raw ->
                 DataOutputStream(CipherOutputStream(raw, payloadCipher)).use { payload ->
-                        val textBytes = text.toByteArray(Charsets.UTF_8)
-                        val groupBytes = groupId.toByteArray(Charsets.UTF_8)
-                        payload.writeInt(groupBytes.size)
-                        payload.write(groupBytes)
-                        payload.writeInt(textBytes.size)
-                        payload.write(textBytes)
-                        payload.writeLong(attachmentBytes)
-                        if (attachment != null) {
-                            FileInputStream(attachment).use { input -> input.copyTo(payload, 32 * 1024) }
-                        }
+                    val textBytes = text.toByteArray(Charsets.UTF_8)
+                    val groupBytes = groupId.toByteArray(Charsets.UTF_8)
+                    payload.writeInt(groupBytes.size)
+                    payload.write(groupBytes)
+                    payload.writeInt(textBytes.size)
+                    payload.write(textBytes)
+                    payload.writeLong(attachmentBytes)
+                    if (attachment != null) {
+                        FileInputStream(attachment).use { input -> input.copyTo(payload, 32 * 1024) }
+                    }
                 }
             }
             check(temporary.renameTo(outputFile)) { "Could not finalize the encrypted package." }
@@ -170,9 +171,19 @@ internal object AnonymousSubmissionCrypto {
                 if (!chunkHashes.optString(index).matches(Regex("^[a-f0-9]{64}$"))) return false
             }
             if (manifest.optString("ingestionKeyId").isBlank()) return false
+            if (manifest.optString("keyWrap") != "P256-ECDH-HKDF-SHA256+A256GCM" ||
+                manifest.optString("payloadCipher") != "A256GCM") return false
             val publicEncoded = manifest.getString("anonymousOriginPublicKey")
             val signatureEncoded = manifest.getString("originSignature")
             val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(publicEncoded)))
+            val wrappingPublicKey = KeyFactory.getInstance("EC")
+                .generatePublic(X509EncodedKeySpec(unb64(manifest.getString("wrapEphemeralPublicKey"))))
+            if (!isP256(publicKey) || !isP256(wrappingPublicKey)) return false
+            if (unb64(manifest.getString("wrapSalt")).size != 32 ||
+                unb64(manifest.getString("wrapIv")).size != 12 ||
+                unb64(manifest.getString("wrappedDek")).size != 48 ||
+                unb64(manifest.getString("payloadIv")).size != 12) return false
+            if (signatureEncoded.isBlank() || signatureEncoded.length > 256) return false
             Signature.getInstance("SHA256withECDSA").run {
                 initVerify(publicKey)
                 update(canonicalManifest(manifest))
@@ -187,7 +198,9 @@ internal object AnonymousSubmissionCrypto {
             throw IllegalArgumentException("The configured Mortalive ingestion key is invalid.", it)
         }
         return try {
-            KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(encoded))
+            val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(encoded))
+            require(isP256(publicKey)) { "The ingestion public key must use P-256." }
+            publicKey
         } catch (error: Exception) {
             throw IllegalArgumentException("The ingestion key must be an X.509 P-256 public key.", error)
         }
@@ -253,6 +266,9 @@ internal object AnonymousSubmissionCrypto {
 
     private fun wrapAad(transferId: String, keyId: String): ByteArray =
         listOf("MORTA-MESH-ANON-WRAP-V1", transferId, keyId).joinToString("\n").toByteArray(Charsets.UTF_8)
+
+    private fun isP256(key: PublicKey): Boolean =
+        (key as? ECPublicKey)?.params?.curve?.field?.fieldSize == 256
 
     private fun newEcKeyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply {
         initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
