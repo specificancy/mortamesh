@@ -35,7 +35,9 @@ Mortalive must decrypt to run moderation. Consequently, this is sender-to-ingest
 - Chunk size: 96 KiB; maximum 1,200 chunks; maximum frame 380 KiB; maximum hop TTL 8.
 - Per-chunk hashes are covered by the signed manifest; completed ciphertext is checked against signed total size and full SHA-256.
 - Relay cache: at most 20 transfers / 250 MiB. Entries expire with the package.
-- **Settings → Peer Mode · encrypted carry** explicitly enables relaying. Consent is signed and bound to the transport's authenticated Mesh node identity.
+- Draft encryption/import and large relay forwarding run on background executors.
+- **Settings → Peer Mode · encrypted carry** explicitly enables carrying other people's submissions; sending your own submission does not require this setting. Consent is signed and bound to the transport's authenticated Mesh node identity.
+- A per-neighbor admission limiter allows up to eight distinct incoming transfer IDs / 250 MiB per hour by default; subsequent chunks for an admitted transfer continue through.
 - Anonymous body chunks are carried over Wi-Fi Direct. BLE remains for short control/discovery traffic.
 - Settings shows relay cache usage and provides a clear-cache option.
 
