@@ -1,0 +1,254 @@
+MORTA MESH 0.7.0 — LATEST APP WORKFLOW & CHANGE HANDOFF
+Date: 3 November 2026
+Repository changed: specificancy/mortamesh
+Branch: feature/anonymous-mesh-group-publishing
+Scope: Morta Mesh only. No Mortalive repository, deployment, database, API, or configuration was changed.
+
+======================================================================
+1. PRODUCT CONTEXT
+======================================================================
+
+MORTA MESH
+Morta Mesh is an offline-first Android nearby messenger. It is designed to work without a Mortalive account, user registration, or a central messaging server. It discovers nearby Android phones using Bluetooth Low Energy (BLE) and Wi-Fi Direct. When devices have links to each other, the app can carry messages across a multi-hop mesh while Morta Mesh remains running.
+
+MORTALIVE
+Mortalive is a separate social/chat platform and product. Its product surfaces include human profiles and posts, messaging/talk experiences, creator and developer areas, and AI companion personas such as companion, girlfriend, and boyfriend agents.
+
+The request in this feature is a specific connection between those separate products:
+- A person creates a submission in Morta Mesh without a Mortalive account.
+- The item is addressed to a selected Mortalive group conversation.
+- The item may travel across nearby mesh devices as encrypted data.
+- Mortalive temporarily decrypts it in a restricted moderation boundary for the violence/graphic-content check.
+- Only an approved submission is re-encrypted for the destination group and delivered there.
+
+Mortalive's implementation is owned by other engineers. This branch only prepares the Android-side draft, encrypted package format, and mesh ciphertext relay foundation. It does not alter Mortalive.
+
+======================================================================
+2. CHANGES MADE IN MORTA MESH 0.7.0
+======================================================================
+
+A. ANONYMOUS GROUP SUBMISSION COMPOSER
+Location: Conversations → Anonymous group submission.
+
+The new composer accepts:
+- a Mortalive destination group ID or submission code;
+- optional text;
+- an optional photo, video, or audio attachment.
+
+Validation limits:
+- text: maximum 5,000 Unicode code points;
+- attachment: maximum 100 MiB per file;
+- accepted MIME types: JPEG, PNG, WebP, MP4, 3GPP video, and a bounded audio allowlist;
+- draft count: maximum 20;
+- local draft attachment storage: maximum 250 MiB total;
+- local draft lifetime: 72 hours.
+
+This screen explicitly tells the user that the current state is an encrypted local draft. It does not claim to have uploaded, passed moderation, or published it.
+
+B. ENCRYPTED LOCAL DRAFT STORAGE
+New code:
+- AnonymousSubmission.kt
+- AnonymousSubmissionStore.kt
+
+Draft metadata and attachments are saved under app-private storage. AES-GCM encryption uses a key stored in Android Keystore. The group ID, text, MIME metadata, and expiry metadata are inside encrypted draft metadata. Attachment bytes are encrypted separately. The source file selected from Android's picker is copied into an app-private temporary directory and deleted after encrypted save or app shutdown.
+
+The anonymous drafts are separate from the existing Private Vault and separate from private-chat attachment queues.
+
+C. SENDER-TO-INGESTION ENCRYPTION PACKAGE
+New code:
+- AnonymousSubmissionCrypto.kt
+- AnonymousSubmissionPackager.kt
+
+When a future Mortalive integration supplies the authenticated P-256 ingestion public key and key ID, the packager can:
+1. decrypt the local draft attachment briefly into an app cache temporary file;
+2. create a fresh random 256-bit data-encryption key;
+3. encrypt the payload with AES-256-GCM;
+4. wrap the data key to Mortalive's P-256 ingestion key using ephemeral P-256 ECDH, HKDF-SHA256 and AES-GCM;
+5. keep the group ID inside the encrypted payload;
+6. create an origin-signed manifest using a fresh per-submission P-256 ECDSA key;
+7. include a whole-file SHA-256 and signed per-chunk SHA-256 hashes;
+8. delete the temporary plaintext attachment immediately after package creation.
+
+This is sender-to-Mortalive-ingestion encryption with opaque peer relays. It is NOT end-to-end encryption from the origin directly to group members, because Mortalive must inspect the decrypted submission for moderation.
+
+The package builder requires a real ingestion public key and key ID. No dummy keys or guessed production endpoints are configured.
+
+D. SEPARATE ANONYMOUS RELAY PROTOCOL
+New code:
+- AnonymousRelayProtocol.kt
+- AnonymousRelayStore.kt
+
+Wire namespace: @MORTAMESH/2/ANON
+
+The new protocol is kept separate from:
+- @MORTAMESH/2/PACKET (private chat envelopes);
+- @MORTAMESH/2/WORLD (public mesh World Chat).
+
+Relay behavior:
+- chunk size: 96 KiB;
+- maximum relay TTL: 8 hops;
+- maximum chunk count: 1,200;
+- maximum frame size: 380 KiB;
+- each chunk must match its hash in the origin-signed manifest;
+- completed transfer is checked against the signed whole-file byte count and SHA-256;
+- relay cache: maximum 20 transfers and 250 MiB;
+- queued packages expire at the manifest expiry (maximum 72 hours);
+- relays store opaque ciphertext, never open media, and do not need to know the group ID;
+- anonymous submission body chunks use Wi-Fi Direct. BLE is not used for bulk upload payloads.
+
+The per-chunk hash list is part of the signed manifest. A relay cannot replace a chunk and merely change the individual frame hash to make the receiving device accept it.
+
+E. PEER MODE / EXPLICIT RELAY OPT-IN
+Location: Settings → Peer Mode · encrypted carry.
+
+The user must explicitly enable encrypted carry. The consent announcement is signed using the existing Mesh identity and is accepted only after the transport is bound to the same authenticated logical peer identity.
+
+A relay will accept incoming anonymous package frames only when its own carry setting is enabled. It forwards only to connected peers that have also explicitly opted in. The payload is forwarded over Wi-Fi Direct.
+
+Settings displays the number and size of locally stored relay transfers and includes a button to clear the relay cache. Clearing the relay cache does not erase private conversations, the Private Vault, or local anonymous draft files.
+
+A separate internet-gateway permission is not active. No relay device uploads packages to Mortalive yet.
+
+F. VERSION
+Android version values on this branch:
+- versionName: 0.7.0
+- versionCode: 8
+
+======================================================================
+3. WHAT THE USER SEES TODAY
+======================================================================
+
+1. Open Morta Mesh. No Mortalive login or signup is required.
+2. Enable Bluetooth and Wi-Fi, grant Nearby device / Wi-Fi permissions, and tap the nearby discovery action.
+3. Use Home to see nearby status and discoverable/reachable devices.
+4. Use Nearby to connect to direct peers or open a peer reachable through the mesh.
+5. Use Conversations for private one-to-one conversations and the existing public World Chat.
+6. Use the Anonymous group submission card to enter a group ID/code, type text, optionally select media, and save an encrypted local draft.
+7. Saved drafts appear below the composer and can be deleted.
+8. Open Settings and explicitly enable Peer Mode if this phone should carry anonymous submission ciphertext for other devices.
+9. Settings shows relay-cache usage and lets the user clear that cache.
+
+IMPORTANT: Because Mortalive has not supplied its ingestion endpoint, public key, upload API, moderation status API, or group encryption contract, the screen currently saves encrypted local drafts only. A future integration hook exists to package and stage a draft when those backend details are supplied; it is not automatically called by the current screen. There is no actual internet upload, moderation decision, approval notification, or group DM publication in this build.
+
+======================================================================
+4. FULL EXISTING MORTA MESH APP WORKFLOW
+======================================================================
+
+APP NAVIGATION
+The bottom navigation is:
+- Home
+- Nearby
+- Chats / Conversations
+- Vault
+- Settings
+
+HOME
+Shows nearby discovery status, the device's current mesh status, nearby peers and shortcuts to nearby devices and conversations.
+
+NEARBY
+Discovers peers using BLE and Wi-Fi Direct. A direct peer can be opened. Mesh identity advertisements build routes to other nodes. A relayed peer may appear under "Reachable through Morta Mesh". Mesh relays are best-effort while the app and radios are running; this is not a guaranteed always-on background service.
+
+PRIVATE CONVERSATIONS
+Private messages use the existing signed/encrypted Mesh envelope path. The app uses P-256 identity keys, trust-on-first-use key pinning, ephemeral P-256 ECDH, HKDF-SHA256 and AES-256-GCM. The receiver authenticates the sender and decrypts before saving a message. Local chat history is stored encrypted with a Keystore-held AES-GCM key.
+
+The existing cryptographic code is a prototype and has not received independent security certification. It does not provide a Double Ratchet or forward secrecy against later compromise of a recipient's long-term identity key. Users should compare full identity fingerprints out of band before trusting a first contact.
+
+PUBLIC WORLD CHAT
+World Chat is a separate experimental public mesh timeline inside Conversations. Posts are signed but intentionally plaintext and public to participating mesh devices and relays. It is not private and is not the anonymous Mortalive submission path. Posts have a 500 Unicode code-point limit, a per-author rate limit, bounded local retention and an eight-hop relay limit. "World" means the reachable mesh island/network, not the entire internet.
+
+PRIVATE MEDIA
+The private conversation composer can capture photos and videos inside Morta Mesh.
+- Photos are sent only over a direct authenticated BLE connection.
+- Videos are sent only over a direct authenticated Wi-Fi Direct connection.
+- Private media is never automatically relayed through an intermediate phone.
+- If the correct direct link is unavailable, the encrypted media remains queued for its intended recipient.
+- The recipient saves its media copy into its encrypted Private Vault.
+
+PRIVATE VAULT
+Media is stored under app-private storage with AES-GCM and a key held by Android Keystore. The vault is PIN-gated and locks when the app backgrounds. Existing safety limits bound incoming sessions, storage, file sizes and timeouts. Existing media recovery, atomic index handling and write finalization logic remain separate from the new anonymous submission draft store.
+
+SETTINGS
+Includes the local display name, privacy information, Peer Mode encrypted-carry opt-in and relay cache management. No account sign-in is required.
+
+======================================================================
+5. MORTALIVE INTEGRATION DRAFT FOR THE OTHER ENGINEERS
+======================================================================
+
+This is a proposal only. No Mortalive code has been changed.
+
+A. GROUP SUBMISSION PERMISSION WITHOUT A MORTALIVE ACCOUNT
+Mortalive should provide a group-scoped submission code or capability link. It should authorize submissions to one group only, with expiry, revocation, content-type permissions, maximum size, and usage/rate quotas. A private group should not become writable merely because someone knows its group ID.
+
+B. INGESTION PUBLIC KEY
+Mortalive should publish an authenticated versioned P-256 ingestion public key and key ID, plus key-rotation rules. The Android packager requires an X.509 P-256 public key. The backend/security owners should approve or replace this exact primitive before production, ideally with a reviewed HPKE profile if that is the selected standard.
+
+C. RESUMABLE API
+Mortalive should define create/resume upload session, upload encrypted chunk, finalize, and status lookup operations. The same contract should support:
+- direct upload from the original phone with validated internet;
+- upload by a relay device that has separately opted into internet gateway use.
+
+The endpoint paths and request schemas are deliberately not hardcoded in Mesh because they do not yet exist in the supplied contract.
+
+D. MODERATION
+Mortalive should verify the group capability, manifest signature, timestamps, expiry, hashes, byte limits and MIME allowlist. It should decrypt only inside a restricted processing boundary, safely decode the media, and run the required violence / graphic-content check. Uncertain results should be held for human review. Rejected or held content must not enter the group or expose a public media URL.
+
+E. APPROVED GROUP DELIVERY
+After approval, Mortalive should re-encrypt the approved media using its established group-message mechanism and insert a normal group chat message/attachment. Group-chat and key-management engineers must define how an authorized publisher creates a valid group-encrypted envelope without weakening the key isolation of group members.
+
+F. ANONYMITY AND ABUSE
+The sender manifest uses an ephemeral key per submission, so its origin signing key does not itself expose a stable Mesh identity. This does not make network activity unobservable: relays may see transfer size/timing and immediate neighboring devices. Mortalive should use group-scoped quotas and consider privacy-preserving anonymous rate-limit tokens (such as blind-signed one-time quotas) instead of forcing submitters to create accounts.
+
+G. STATUS
+Suggested states: draft_saved, waiting_for_peer, relayed, uploaded, processing, needs_review, published, rejected, expired. Relay storage is not the same as server upload; server upload is not the same as moderation approval; approval is not complete until group publication is confirmed.
+
+H. ENCRYPTION DISCLOSURE
+The required moderation decrypt/re-encrypt stage means the flow is not E2E from the submitting phone to group members. Mesh relays see ciphertext only; the trusted Mortalive moderation boundary temporarily sees plaintext; approved group content is then re-encrypted for the group.
+
+See MORTALIVE_INTEGRATION_DRAFT.md in the repository for the full technical proposal.
+
+======================================================================
+6. LIMITATIONS AND TESTING STILL REQUIRED
+======================================================================
+
+NOT YET WORKING
+- No Mortalive upload URL or HTTP API is configured.
+- No ingestion public key is configured.
+- No internet gateway upload path is implemented.
+- No Mortalive moderation pipeline or violence model is connected.
+- No approval/rejection status is returned to Mesh.
+- No approved message is inserted into a Mortalive group DM.
+- No Mortalive account or group membership sync is implemented; the future group capability must authorize the anonymous sender.
+
+TESTING REQUIRED
+- Android unit tests and debug APK assembly through GitHub Actions.
+- Physical two-phone BLE and Wi-Fi Direct checks.
+- Physical three-or-more-phone relay tests, with each device's Peer Mode consent states varied.
+- Interrupted transfer and reconnection/resume tests.
+- Duplicate chunk, tampered manifest, tampered chunk, wrong TTL, expired package, cache-full and low-storage tests.
+- Device OEM/background behavior tests while Morta Mesh is running and after process suspension.
+- End-to-end backend contract tests once Mortalive engineers supply test endpoints and key material.
+- Independent cryptographic/security review before production.
+
+The existing Morta Mesh cryptographic primitives and these new anonymous submission primitives are prototype code, not an audited production security guarantee.
+
+======================================================================
+7. REPOSITORY FILES ADDED / CHANGED FOR THIS FEATURE
+======================================================================
+
+New source files:
+- app/src/main/java/com/mortalive/mortamesh/AnonymousSubmission.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousSubmissionStore.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousSubmissionCrypto.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousSubmissionPackager.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousRelayProtocol.kt
+- app/src/main/java/com/mortalive/mortamesh/AnonymousRelayStore.kt
+- app/src/test/java/com/mortalive/mortamesh/AnonymousSubmissionPolicyTest.kt
+
+Updated:
+- app/src/main/java/com/mortalive/mortamesh/MainActivity.kt
+- app/build.gradle.kts (0.7.0 / versionCode 8)
+- README.md
+- GLOBAL_MEDIA_RELAY.md
+- MORTALIVE_INTEGRATION_DRAFT.md
+
+No Mortalive repository, service, website, database, endpoint, agent, or deployment was changed.
