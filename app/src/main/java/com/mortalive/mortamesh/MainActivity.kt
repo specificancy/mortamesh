@@ -3545,9 +3545,9 @@ class MainActivity : Activity() {
             text.startsWith(AnonymousRelayProtocol.PREFIX) -> meshProtocolExecutor.execute {
                 if (!preferences.getBoolean("anonymous_relay_carry_enabled", false)) return@execute
                 if (!sourcePeerId.startsWith(WIFI_PREFIX)) return@execute
+                val header = AnonymousRelayProtocol.peekHeader(text) ?: return@execute
+                if (!anonymousRelayAdmissionLimiter.allow(sourcePeerId, header.transferId, header.declaredCiphertextBytes)) return@execute
                 val incoming = AnonymousRelayProtocol.parse(text) ?: return@execute
-                val declaredBytes = incoming.manifest.optLong("ciphertextBytes", -1L)
-                if (!anonymousRelayAdmissionLimiter.allow(sourcePeerId, incoming.transferId, declaredBytes)) return@execute
                 when (anonymousRelayStore.acceptFrame(text)) {
                     AnonymousRelayStore.AcceptResult.STORED,
                     AnonymousRelayStore.AcceptResult.COMPLETE -> {
