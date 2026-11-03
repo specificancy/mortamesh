@@ -64,11 +64,11 @@ internal object AnonymousSubmissionCrypto {
         val wrapKeyPair = newEcKeyPair()
         val salt = ByteArray(32).also(SecureRandom()::nextBytes)
         val wrapIv = ByteArray(12).also(SecureRandom()::nextBytes)
-        val wrapKey = deriveWrapKey(wrapKeyPair, recipientKey, salt, transferId, groupId)
+        val wrapKey = deriveWrapKey(wrapKeyPair, recipientKey, salt, transferId, ingestionKeyId)
         val wrappedDek = try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(wrapKey, "AES"), GCMParameterSpec(128, wrapIv))
-            cipher.updateAAD(wrapAad(transferId, groupId, ingestionKeyId))
+            cipher.updateAAD(wrapAad(transferId, ingestionKeyId))
             cipher.doFinal(dataKey)
         } finally {
             wrapKey.fill(0)
@@ -80,11 +80,14 @@ internal object AnonymousSubmissionCrypto {
             val payloadCipher = Cipher.getInstance("AES/GCM/NoPadding")
             payloadCipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(dataKey, "AES"))
             val payloadIv = payloadCipher.iv
-            payloadCipher.updateAAD(payloadAad(transferId, groupId, mime, createdAt))
+            payloadCipher.updateAAD(payloadAad(transferId, mime, createdAt))
             FileOutputStream(temporary).use { raw ->
                 CipherOutputStream(raw, payloadCipher).use { encrypted ->
                     DataOutputStream(encrypted).use { payload ->
                         val textBytes = text.toByteArray(Charsets.UTF_8)
+                        val groupBytes = groupId.toByteArray(Charsets.UTF_8)
+                        payload.writeInt(groupBytes.size)
+                        payload.write(groupBytes)
                         payload.writeInt(textBytes.size)
                         payload.write(textBytes)
                         payload.writeLong(attachmentBytes)
@@ -99,7 +102,7 @@ internal object AnonymousSubmissionCrypto {
             val manifest = JSONObject()
                 .put("v", 1)
                 .put("transferId", transferId)
-                .put("groupId", groupId)
+                .put("destinationType", "mort-alive-group")
                 .put("contentType", mime ?: "text/plain")
                 .put("textCodePoints", text.codePointCount(0, text.length))
                 .put("attachmentBytes", attachmentBytes)
@@ -139,13 +142,14 @@ internal object AnonymousSubmissionCrypto {
     fun verifyManifest(manifest: JSONObject): Boolean = try {
         if (manifest.optInt("v") != 1) return false
         val transferId = manifest.optString("transferId")
-        val groupId = manifest.optString("groupId")
         val contentType = manifest.optString("contentType")
         val expiresAt = manifest.optLong("expiresAt", -1L)
-        if (!isCanonicalUuid(transferId) || !AnonymousSubmissionPolicy.isValidGroupId(groupId)) return false
+        if (!isCanonicalUuid(transferId) || manifest.optString("destinationType") != "mort-alive-group") return false
         if (contentType != "text/plain" && !AnonymousSubmissionPolicy.isAcceptedMime(contentType)) return false
         if (expiresAt <= System.currentTimeMillis() || expiresAt - manifest.optLong("createdAt", 0L) > AnonymousSubmissionPolicy.RETENTION_MS) return false
         if (manifest.optLong("ciphertextBytes", -1L) !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
+        if (!manifest.optString("ciphertextSha256").matches(Regex("^[a-f0-9]{64}$"))) return false
+        if (manifest.optString("ingestionKeyId").isBlank()) return false
         val publicEncoded = manifest.getString("anonymousOriginPublicKey")
         val signatureEncoded = manifest.getString("originSignature")
         val publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(publicEncoded)))
@@ -172,14 +176,14 @@ internal object AnonymousSubmissionCrypto {
         recipient: PublicKey,
         salt: ByteArray,
         transferId: String,
-        groupId: String
+        keyId: String
     ): ByteArray {
         val agreement = KeyAgreement.getInstance("ECDH")
         agreement.init(ephemeral.private)
         agreement.doPhase(recipient, true)
         val shared = agreement.generateSecret()
         return try {
-            hkdf(shared, salt, "MortaMesh-Anonymous-Ingestion-v1|$transferId|$groupId".toByteArray(Charsets.UTF_8), 32)
+            hkdf(shared, salt, "MortaMesh-Anonymous-Ingestion-v1|$transferId|$keyId".toByteArray(Charsets.UTF_8), 32)
         } finally {
             shared.fill(0)
         }
@@ -221,12 +225,12 @@ internal object AnonymousSubmissionCrypto {
         return canonical.toString().toByteArray(Charsets.UTF_8)
     }
 
-    private fun payloadAad(transferId: String, groupId: String, mime: String?, createdAt: Long): ByteArray =
-        listOf("MORTA-MESH-ANON-PAYLOAD-V1", transferId, groupId, mime ?: "text/plain", createdAt.toString())
+    private fun payloadAad(transferId: String, mime: String?, createdAt: Long): ByteArray =
+        listOf("MORTA-MESH-ANON-PAYLOAD-V1", transferId, mime ?: "text/plain", createdAt.toString())
             .joinToString("\n").toByteArray(Charsets.UTF_8)
 
-    private fun wrapAad(transferId: String, groupId: String, keyId: String): ByteArray =
-        listOf("MORTA-MESH-ANON-WRAP-V1", transferId, groupId, keyId).joinToString("\n").toByteArray(Charsets.UTF_8)
+    private fun wrapAad(transferId: String, keyId: String): ByteArray =
+        listOf("MORTA-MESH-ANON-WRAP-V1", transferId, keyId).joinToString("\n").toByteArray(Charsets.UTF_8)
 
     private fun newEcKeyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply {
         initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
