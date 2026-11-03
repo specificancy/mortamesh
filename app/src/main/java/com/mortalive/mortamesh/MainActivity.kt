@@ -1331,7 +1331,7 @@ class MainActivity : Activity() {
         val relayMode = card()
         val carryEnabled = preferences.getBoolean("anonymous_relay_carry_enabled", false)
         relayMode.addView(label("Peer Mode · encrypted carry", 15f, ink, true))
-        relayMode.addView(label("Opt in to temporarily store and forward anonymous Mortalive submissions as opaque ciphertext over Wi-Fi Direct. Relays do not receive the group destination or media decryption key. The queue is capped at 250 MiB / 20 transfers and expires after the package expiry (maximum 72 hours).", 12f, muted).apply {
+        relayMode.addView(label("Opt in to temporarily store and forward other people's anonymous Mortalive submissions as opaque ciphertext over Wi-Fi Direct. Sending your own submission will not require this setting. Relays do not receive the group destination or media decryption key. The queue is capped at 250 MiB / 20 transfers and expires after the package expiry (maximum 72 hours).", 12f, muted).apply {
             setPadding(0, dp(7), 0, dp(9)); setLineSpacing(dp(3).toFloat(), 1f)
         })
         relayMode.addView(primaryButton(if (carryEnabled) "Pause encrypted carry" else "Enable encrypted carry") {
