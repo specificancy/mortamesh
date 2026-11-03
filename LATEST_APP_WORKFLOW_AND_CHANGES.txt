@@ -103,7 +103,11 @@ Location: Settings → Peer Mode · encrypted carry.
 
 The user must explicitly enable encrypted carry. The consent announcement is signed using the existing Mesh identity and is accepted only after the transport is bound to the same authenticated logical peer identity.
 
-A relay will accept incoming anonymous package frames only when its own carry setting is enabled. It forwards only to connected peers that have also explicitly opted in. The payload is forwarded over Wi-Fi Direct.
+A relay will accept incoming anonymous package frames only when its own carry setting is enabled. It forwards received packages only to connected peers that have also explicitly opted in. A user can send their own submission to an opted-in relay without enabling their own carry setting. The payload is forwarded over Wi-Fi Direct.
+
+A per-neighbor admission limiter allows up to eight distinct incoming transfer IDs and 250 MiB of declared transfer data per hour by default. Once a transfer is admitted, its subsequent chunks are allowed through so it can complete. This is a bounded abuse throttle, not an origin identity or reputation system.
+
+Draft file import/encryption and large relay forwarding run on background executors instead of the Android UI thread.
 
 Settings displays the number and size of locally stored relay transfers and includes a button to clear the relay cache. Clearing the relay cache does not erase private conversations, the Private Vault, or local anonymous draft files.
 
@@ -125,7 +129,7 @@ Android version values on this branch:
 5. Use Conversations for private one-to-one conversations and the existing public World Chat.
 6. Use the Anonymous group submission card to enter a group ID/code, type text, optionally select media, and save an encrypted local draft.
 7. Saved drafts appear below the composer and can be deleted.
-8. Open Settings and explicitly enable Peer Mode if this phone should carry anonymous submission ciphertext for other devices.
+8. Open Settings and explicitly enable Peer Mode if this phone should carry other people's anonymous submission ciphertext. Sending your own future submission will not require this opt-in.
 9. Settings shows relay-cache usage and lets the user clear that cache.
 
 IMPORTANT: Because Mortalive has not supplied its ingestion endpoint, public key, upload API, moderation status API, or group encryption contract, the screen currently saves encrypted local drafts only. A future integration hook exists to package and stage a draft when those backend details are supplied; it is not automatically called by the current screen. There is no actual internet upload, moderation decision, approval notification, or group DM publication in this build.
