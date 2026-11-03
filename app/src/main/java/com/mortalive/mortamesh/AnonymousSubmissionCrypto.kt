@@ -106,7 +106,7 @@ internal object AnonymousSubmissionCrypto {
                 .put("contentType", mime ?: "text/plain")
                 .put("textCodePoints", text.codePointCount(0, text.length))
                 .put("attachmentBytes", attachmentBytes)
-                .put("plainBytes", text.toByteArray(Charsets.UTF_8).size + 8L + attachmentBytes)
+                .put("plainBytes", groupId.toByteArray(Charsets.UTF_8).size + text.toByteArray(Charsets.UTF_8).size + 16L + attachmentBytes)
                 .put("createdAt", createdAt)
                 .put("expiresAt", expiresAt)
                 .put("ingestionKeyId", ingestionKeyId)
@@ -145,8 +145,15 @@ internal object AnonymousSubmissionCrypto {
         val contentType = manifest.optString("contentType")
         val expiresAt = manifest.optLong("expiresAt", -1L)
         if (!isCanonicalUuid(transferId) || manifest.optString("destinationType") != "mort-alive-group") return false
+        val createdAt = manifest.optLong("createdAt", -1L)
+        val attachmentBytes = manifest.optLong("attachmentBytes", -1L)
+        val textCodePoints = manifest.optInt("textCodePoints", -1)
         if (contentType != "text/plain" && !AnonymousSubmissionPolicy.isAcceptedMime(contentType)) return false
-        if (expiresAt <= System.currentTimeMillis() || expiresAt - manifest.optLong("createdAt", 0L) > AnonymousSubmissionPolicy.RETENTION_MS) return false
+        if (createdAt <= 0L || createdAt > System.currentTimeMillis() + 5L * 60L * 1000L) return false
+        if (expiresAt <= System.currentTimeMillis() || expiresAt - createdAt !in 1L..AnonymousSubmissionPolicy.RETENTION_MS) return false
+        if (attachmentBytes !in 0L..AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) return false
+        if ((contentType == "text/plain") != (attachmentBytes == 0L)) return false
+        if (textCodePoints !in 0..AnonymousSubmissionPolicy.MAX_TEXT_CODE_POINTS) return false
         if (manifest.optLong("ciphertextBytes", -1L) !in 16L..(AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES + 1024L * 1024L)) return false
         if (!manifest.optString("ciphertextSha256").matches(Regex("^[a-f0-9]{64}$"))) return false
         if (manifest.optString("ingestionKeyId").isBlank()) return false
