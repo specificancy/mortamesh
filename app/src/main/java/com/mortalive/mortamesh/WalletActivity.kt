@@ -168,7 +168,7 @@ class WalletActivity : Activity() {
             12f, muted
         ).apply { setPadding(0, dp(7), 0, dp(9)); setLineSpacing(dp(3).toFloat(), 1f) })
         lama.addView(label(
-            "This app uses Lama Coin as the project name. It does not silently rename existing BUDDH code, alter the ticker, or generate a placeholder address.",
+            "Lama Coin is the intended product name. The wallet adapter, ticker and network identifiers will be connected only after their mobile integration and chain identity are finalized; no placeholder address is generated.",
             11f, muted
         ).apply { setLineSpacing(dp(2).toFloat(), 1f) })
         body.addView(lama)
