@@ -14,7 +14,7 @@ import kotlin.math.ceil
  */
 internal object AnonymousRelayProtocol {
     const val PREFIX = "@MORTAMESH/2/ANON|"
-    const val MAX_FRAME_BYTES = 180 * 1024
+    const val MAX_FRAME_BYTES = 380 * 1024
     const val CHUNK_BYTES = AnonymousSubmissionPolicy.RELAY_CHUNK_BYTES
     const val MAX_CHUNKS = 1_200
 
@@ -70,6 +70,10 @@ internal object AnonymousRelayProtocol {
         require(index in 0 until total && total in 1..MAX_CHUNKS)
         require(chunk.isNotEmpty() && chunk.size <= CHUNK_BYTES)
         require(AnonymousSubmissionCrypto.verifyManifest(manifest))
+        require(manifest.optString("transferId") == transferId)
+        require(manifest.optJSONArray("chunkSha256s")?.optString(index) == sha256(chunk)) {
+            "Chunk does not match the origin-signed manifest."
+        }
         val json = JSONObject()
             .put("v", 1)
             .put("id", transferId)
@@ -104,6 +108,7 @@ internal object AnonymousRelayProtocol {
             if (expectedBytes !in 1..CHUNK_BYTES) return null
             val chunk = Base64.getUrlDecoder().decode(json.getString("data"))
             if (chunk.size != expectedBytes || sha256(chunk) != json.optString("chunkSha256")) return null
+            if (manifest.optJSONArray("chunkSha256s")?.optString(index) != sha256(chunk)) return null
             Frame(transferId, ttl, index, total, manifest, chunk)
         } catch (_: Exception) { null }
     }
