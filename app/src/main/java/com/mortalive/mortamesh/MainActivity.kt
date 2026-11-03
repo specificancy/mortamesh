@@ -831,7 +831,6 @@ class MainActivity : Activity() {
                         if (currentScreen == Screen.ANONYMOUS_POST) render()
                     }
                 } catch (error: Exception) {
-                    selectedFile?.let { if (!it.exists()) Unit }
                     mainHandler.post {
                         anonymousDraftSaving = false
                         Toast.makeText(this, error.message ?: "Could not save the encrypted draft.", Toast.LENGTH_LONG).show()
@@ -893,42 +892,61 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun importAnonymousAttachment(uri: Uri): Boolean {
-        val mime = AnonymousSubmissionPolicy.normalizeMime(contentResolver.getType(uri))
-        if (!AnonymousSubmissionPolicy.isAcceptedMime(mime)) {
-            Toast.makeText(this, "Choose a supported photo, video, or audio file.", Toast.LENGTH_LONG).show()
-            return false
+    private fun importAnonymousAttachment(uri: Uri) {
+        if (anonymousAttachmentImporting) {
+            Toast.makeText(this, "An attachment is already being imported.", Toast.LENGTH_SHORT).show()
+            return
         }
-        val directory = File(cacheDir, "anonymous-source").apply { mkdirs() }
-        val candidate = File(directory, UUID.randomUUID().toString() + ".tmp")
-        return try {
-            var total = 0L
-            val input = contentResolver.openInputStream(uri) ?: throw java.io.IOException("The selected file could not be opened.")
-            input.use { source ->
-                FileOutputStream(candidate).use { output ->
-                    val buffer = ByteArray(32 * 1024)
-                    while (true) {
-                        val count = source.read(buffer)
-                        if (count < 0) break
-                        total += count
-                        if (total > AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) {
-                            throw java.io.IOException("The attachment must be 100 MiB or smaller.")
+        anonymousAttachmentImporting = true
+        anonymousAttachmentInfo?.text = "Importing attachment…"
+        anonymousSubmissionExecutor.execute {
+            var candidate: File? = null
+            try {
+                val mime = AnonymousSubmissionPolicy.normalizeMime(contentResolver.getType(uri))
+                require(AnonymousSubmissionPolicy.isAcceptedMime(mime)) {
+                    "Choose a supported photo, video, or audio file."
+                }
+                val directory = File(cacheDir, "anonymous-source").apply { mkdirs() }
+                candidate = File(directory, UUID.randomUUID().toString() + ".tmp")
+                var total = 0L
+                val input = contentResolver.openInputStream(uri)
+                    ?: throw java.io.IOException("The selected file could not be opened.")
+                input.use { source ->
+                    FileOutputStream(candidate!!).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        while (true) {
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > AnonymousSubmissionPolicy.MAX_ATTACHMENT_BYTES) {
+                                throw java.io.IOException("The attachment must be 100 MiB or smaller.")
+                            }
+                            output.write(buffer, 0, count)
                         }
-                        output.write(buffer, 0, count)
+                        output.fd.sync()
                     }
-                    output.fd.sync()
+                }
+                if (total <= 0L) throw java.io.IOException("The selected file is empty.")
+                val imported = candidate!!
+                mainHandler.post {
+                    anonymousAttachmentImporting = false
+                    if (currentScreen != Screen.ANONYMOUS_POST || isFinishing) {
+                        imported.delete()
+                        return@post
+                    }
+                    anonymousSelectedFile?.delete()
+                    anonymousSelectedFile = imported
+                    anonymousSelectedMime = mime
+                    anonymousAttachmentInfo?.text = "Selected · ${imported.name} · ${formatBytes(total)}"
+                }
+            } catch (error: Exception) {
+                candidate?.delete()
+                mainHandler.post {
+                    anonymousAttachmentImporting = false
+                    anonymousAttachmentInfo?.text = "No attachment selected"
+                    Toast.makeText(this, error.message ?: "Could not read the selected attachment.", Toast.LENGTH_LONG).show()
                 }
             }
-            if (total <= 0L) throw java.io.IOException("The selected file is empty.")
-            anonymousSelectedFile?.delete()
-            anonymousSelectedFile = candidate
-            anonymousSelectedMime = mime
-            anonymousAttachmentInfo?.text = "Selected · ${candidate.name} · ${formatBytes(total)}"
-            true
-        } catch (error: Exception) {
-            candidate.delete()
-            Toast.makeText(this, error.message ?: "Could not read the selected attachment.", Toast.LENGTH_LONG).show()
-            false
         }
     }
 
