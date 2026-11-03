@@ -83,7 +83,7 @@ internal object AnonymousRelayProtocol {
         require(ttl in 0..AnonymousSubmissionPolicy.MAX_RELAY_HOPS)
         require(index in 0 until total && total in 1..MAX_CHUNKS)
         require(chunk.isNotEmpty() && chunk.size <= CHUNK_BYTES)
-        require(AnonymousSubmissionCrypto.verifyManifest(manifest))
+        require(verifyManifestCached(manifest))
         require(manifest.optString("transferId") == transferId)
         require(manifest.optJSONArray("chunkSha256s")?.optString(index) == sha256(chunk)) {
             "Chunk does not match the origin-signed manifest."
