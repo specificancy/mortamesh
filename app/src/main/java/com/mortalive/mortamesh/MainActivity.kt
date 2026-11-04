@@ -90,14 +90,7 @@ import java.util.concurrent.Executors
 import java.util.Locale
 import kotlin.math.max
 
-class MainActivity : Activity() {
-    private val blue = 0xFF1877F2.toInt()
-    private val blueLight = 0xFFEAF2FF.toInt()
-    private val ink = 0xFF172033.toInt()
-    private val muted = 0xFF667085.toInt()
-    private val background = 0xFFF6F8FC.toInt()
-    private val border = 0xFFE6EAF1.toInt()
-    private val white = 0xFFFFFFFF.toInt()
+class MainActivity : UiKitActivity() {
     private val green = 0xFF159467.toInt()
 
     private lateinit var content: FrameLayout
@@ -423,51 +416,7 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun rounded(color: Int, radiusDp: Int, strokeColor: Int? = null): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = dp(radiusDp).toFloat()
-        if (strokeColor != null) setStroke(dp(1), strokeColor)
-    }
-
-    private fun label(text: String, size: Float, color: Int = ink, bold: Boolean = false): TextView = TextView(this).apply {
-        this.text = text
-        textSize = size
-        setTextColor(color)
-        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        gravity = Gravity.CENTER_VERTICAL
-        includeFontPadding = false
-    }
-
     private fun vSpace(height: Int): View = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(height)) }
-
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(16))
-        background = rounded(white, 20, border)
-        elevation = dp(1).toFloat()
-    }
-
-    private fun primaryButton(text: String, onClick: () -> Unit): TextView = label(text, 14f, white, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(12), dp(9), dp(12), dp(9))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        background = rounded(blue, 11)
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-    }
-
-    private fun secondaryButton(text: String, onClick: () -> Unit): TextView = label(text, 13f, blue, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(10), dp(8), dp(10), dp(8))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        background = rounded(blueLight, 11)
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-    }
 
     private fun page(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
