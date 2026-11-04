@@ -42,6 +42,7 @@ class WalletActivity : Activity() {
     private var syncText = "Not synced"
     private var syncing = false
     private var receiveAddress = ""
+    private var walletScrollView: ScrollView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,10 +59,13 @@ class WalletActivity : Activity() {
     override fun onDestroy() {
         try { engine.close() } catch (_: Exception) { }
         executor.shutdownNow()
+        walletScrollView = null
         super.onDestroy()
     }
 
     private fun render() {
+        // Keep the reader's place when sync or wallet updates rebuild the view tree.
+        val previousScrollY = walletScrollView?.scrollY ?: 0
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(this@WalletActivity.background)
@@ -202,7 +206,9 @@ class WalletActivity : Activity() {
 
         scroll.addView(body, android.view.ViewGroup.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        walletScrollView = scroll
         setContentView(root)
+        scroll.post { scroll.scrollTo(0, previousScrollY) }
     }
 
     private fun openSavedWallet() {
