@@ -3,6 +3,9 @@ package com.mortalive.mortamesh
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileOutputStream
 import java.security.KeyStore
@@ -22,7 +25,10 @@ internal class WalletSecretVault(context: Context) {
     fun exists(walletId: String, networkId: String): Boolean =
         secretFile(walletId, networkId).isFile
 
-    fun save(walletId: String, networkId: String, secret: ByteArray) {
+    fun save(walletId: String, networkId: String, secret: ByteArray) =
+        synchronized(SAVE_LOCK) { saveLocked(walletId, networkId, secret) }
+
+    private fun saveLocked(walletId: String, networkId: String, secret: ByteArray) {
         require(secret.isNotEmpty()) { "Wallet secret cannot be empty" }
         val target = secretFile(walletId, networkId)
         check(!target.exists()) { "Wallet recovery data already exists; refusing to overwrite it" }
@@ -39,7 +45,18 @@ internal class WalletSecretVault(context: Context) {
                 output.write(envelope)
                 output.fd.sync()
             }
-            check(temporary.renameTo(target)) { "Could not atomically store encrypted wallet recovery data" }
+            try {
+                // link() fails with EEXIST instead of replacing an existing recovery file.
+                Os.link(temporary.absolutePath, target.absolutePath)
+            } catch (error: ErrnoException) {
+                if (error.errno == OsConstants.EEXIST) {
+                    throw IllegalStateException("Wallet recovery data already exists; refusing to overwrite it", error)
+                }
+                // The process-wide lock and this re-check protect the fallback on filesystems that reject hard links.
+                check(!target.exists()) { "Wallet recovery data already exists; refusing to overwrite it" }
+                check(temporary.renameTo(target)) { "Could not atomically store encrypted wallet recovery data" }
+            }
+            syncRootDirectory()
         } finally {
             temporary.delete()
             envelope.fill(0)
@@ -63,6 +80,16 @@ internal class WalletSecretVault(context: Context) {
             return cipher.doFinal(payload.ciphertext)
         } finally {
             envelopeBytes.fill(0)
+        }
+    }
+
+    /** Best-effort durability for the newly linked directory entry. */
+    private fun syncRootDirectory() {
+        try {
+            val fd = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(fd) } finally { Os.close(fd) }
+        } catch (_: Exception) {
+            // The encrypted file itself was already fsynced; directory fsync is best-effort on Android filesystems.
         }
     }
 
@@ -106,6 +133,7 @@ internal class WalletSecretVault(context: Context) {
     }
 
     companion object {
+        private val SAVE_LOCK = Any()
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128

@@ -20,6 +20,10 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 
+// Activity recreation can create multiple engine instances; serialize create/restore process-wide.
+private val WALLET_CREATION_LOCK = Any()
+private const val BACKUP_PENDING_KEY = "btc_testnet4_backup_pending"
+
 /** Bitcoin Testnet4-only adapter backed by the Bitcoin Dev Kit Android bindings. */
 internal class BitcoinTestnetWalletEngine(context: Context) {
     data class Snapshot(
@@ -47,7 +51,7 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
 
     fun hasWallet(): Boolean = secretVault.exists(walletId, networkId)
 
-    fun createNewTestnetWallet(): String {
+    fun createNewTestnetWallet(): String = synchronized(WALLET_CREATION_LOCK) {
         check(!hasWallet()) { "A Bitcoin Testnet4 wallet already exists on this device" }
         check(!databaseFile.exists()) {
             "A wallet database exists without its encrypted recovery material. It was preserved."
@@ -56,15 +60,20 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
         val phrase = mnemonic.toString()
         val bytes = phrase.toByteArray(StandardCharsets.UTF_8)
         try {
+            // Commit the recovery obligation before writing the secret. A failed marker write must
+            // abort creation rather than leave a wallet whose phrase cannot be recovered after a crash.
+            check(metadata.edit().putBoolean(BACKUP_PENDING_KEY, true).commit()) {
+                "Could not persist the wallet recovery-backup state"
+            }
             secretVault.save(walletId, networkId, bytes)
             openWithMnemonic(mnemonic, createOnly = true)
         } finally {
             bytes.fill(0)
         }
-        return phrase
+        phrase
     }
 
-    fun restoreTestnetWallet(recoveryPhrase: String) {
+    fun restoreTestnetWallet(recoveryPhrase: String) = synchronized(WALLET_CREATION_LOCK) {
         check(!hasWallet()) { "A Bitcoin Testnet4 wallet already exists on this device" }
         check(!databaseFile.exists()) {
             "A wallet database exists without its encrypted recovery material. It was preserved."
@@ -75,6 +84,11 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
         val canonical = mnemonic.toString().toByteArray(StandardCharsets.UTF_8)
         try {
             secretVault.save(walletId, networkId, canonical)
+            // A restored wallet's owner already supplied the recovery phrase; clear any stale
+            // pending marker left by an interrupted earlier creation attempt.
+            check(metadata.edit().remove(BACKUP_PENDING_KEY).commit()) {
+                "Could not update the wallet recovery-backup state"
+            }
             openWithMnemonic(mnemonic, createOnly = true)
         } finally {
             canonical.fill(0)
@@ -82,6 +96,8 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
     }
 
     fun openExistingWallet(): Snapshot {
+        // Do not replace the active BDK wallet/persister when the screen is re-entered.
+        synchronized(lock) { if (wallet != null) return snapshot() }
         val secret = secretVault.load(walletId, networkId)
             ?: throw IllegalStateException("No Bitcoin Testnet4 wallet is configured")
         val phrase = try {
@@ -95,6 +111,23 @@ internal class BitcoinTestnetWalletEngine(context: Context) {
             snapshot()
         } finally {
             // Kotlin/Java Strings are immutable; keep their lifetime short and never log or persist them.
+        }
+    }
+
+    /** True until the user confirms that the newly-created recovery phrase was backed up offline. */
+    fun isBackupPending(): Boolean = hasWallet() && metadata.getBoolean(BACKUP_PENDING_KEY, false)
+
+    /** The phrase can only be re-read while backup acknowledgement is pending. */
+    fun recoveryPhraseForBackup(): String {
+        check(isBackupPending()) { "The recovery phrase backup was already acknowledged" }
+        val secret = secretVault.load(walletId, networkId)
+            ?: throw IllegalStateException("No Bitcoin Testnet4 wallet is configured")
+        return try { String(secret, StandardCharsets.UTF_8) } finally { secret.fill(0) }
+    }
+
+    fun acknowledgeBackup() {
+        check(metadata.edit().remove(BACKUP_PENDING_KEY).commit()) {
+            "Could not save the recovery phrase backup confirmation"
         }
     }
 
