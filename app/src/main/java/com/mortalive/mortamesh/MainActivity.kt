@@ -171,6 +171,7 @@ class MainActivity : UiKitActivity() {
     private val physicalNodeByTransport = linkedMapOf<String, String>()
     private val meshRoutes = linkedMapOf<String, MeshRoute>()
     private val identityRecords = linkedMapOf<String, JSONObject>()
+    private val keyChangedContacts = linkedSetOf<String>()
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
@@ -278,6 +279,8 @@ class MainActivity : UiKitActivity() {
         const val MEDIA_BLE_CHUNK_BYTES = 900
         const val WIFI_MAX_FRAME_CHARS = 400_000
         const val WIFI_HELLO_TIMEOUT_MS = 15_000
+        const val KEY_CHANGED_KEY_PREFIX = "mesh_key_changed_contact_"
+        const val VERIFIED_FINGERPRINT_PREFIX = "mesh_verified_fingerprint_"
     }
 
     private val wifiChannelListener: WifiP2pManager.ChannelListener = WifiP2pManager.ChannelListener {
@@ -295,6 +298,9 @@ class MainActivity : UiKitActivity() {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         }
         preferences = getSharedPreferences("morta_mesh_local", Context.MODE_PRIVATE)
+        preferences.all.keys
+            .filter { it.startsWith(KEY_CHANGED_KEY_PREFIX) && preferences.getBoolean(it, false) }
+            .forEach { keyChangedContacts.add(it.removePrefix(KEY_CHANGED_KEY_PREFIX)) }
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
         anonymousSubmissionStore = AnonymousSubmissionStore(this)
@@ -676,7 +682,13 @@ class MainActivity : UiKitActivity() {
                 }
                 box.addView(AvatarView(this, nameFor(id)), LinearLayout.LayoutParams(dp(46), dp(46)))
                 val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, 0, 0) }
+                val nodeId = resolveTargetNode(id)
+                val status = identityVerificationStatus(nodeId)
+                box.contentDescription = "Conversation with ${nameFor(id)}. Identity status: $status. Double tap to open."
                 col.addView(label(nameFor(id), 14f, ink, true))
+                col.addView(label(status, 11f, if (status == "Key changed") 0xFFB42318.toInt() else if (status == "Verified") green else muted, status == "Key changed").apply {
+                    setPadding(0, dp(4), 0, 0)
+                })
                 col.addView(label(last.text, 12f, muted).apply {
                     setPadding(0, dp(5), 0, 0)
                     maxLines = 2
@@ -1376,6 +1388,15 @@ class MainActivity : UiKitActivity() {
             else if (chatConnected) if (isWifiChat) "Connected · Wi-Fi Direct · E2E encrypted" else "Connected · Bluetooth · E2E encrypted"
             else if (isMeshChat) "Waiting for a mesh route" else if (isWifiChat) "Wi-Fi Direct · connecting" else "Bluetooth LE · nearby"
         headerColumn.addView(label(connectionLabel, 11f, if (chatConnected) green else muted).apply { setPadding(0, dp(4), 0, 0) })
+        val peerNodeId = peerId?.let { resolveTargetNode(it) }
+        val verification = identityVerificationStatus(peerNodeId)
+        headerColumn.addView(label(
+            verification,
+            11f,
+            when (verification) { "Verified" -> green; "Key changed" -> 0xFFB42318.toInt(); else -> muted },
+            verification == "Key changed"
+        ).apply { setPadding(0, dp(3), 0, 0) })
+        val keyChanged = verification == "Key changed"
         top.addView(headerColumn, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(label("⋯", 24f, muted).apply {
             gravity = Gravity.CENTER
@@ -1388,6 +1409,19 @@ class MainActivity : UiKitActivity() {
         })
         top.minimumHeight = dp(66)
         wrapper.addView(top, LinearLayout.LayoutParams(-1, -2))
+        if (keyChanged) {
+            val warning = card().apply {
+                background = rounded(0xFFFFEDEC.toInt(), 12, 0xFFFDA29B.toInt())
+                addView(label("KEY CHANGED · CHAT BLOCKED", 12f, 0xFFB42318.toInt(), true))
+                addView(label("The peer is advertising a different identity key. Do not send messages or media. Confirm their identity through another trusted channel; the app will not silently accept the new key.", 12f, 0xFF912018.toInt()).apply {
+                    setPadding(0, dp(6), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                })
+            }
+            wrapper.addView(warning, LinearLayout.LayoutParams(-1, -2).apply {
+                leftMargin = dp(12); rightMargin = dp(12); topMargin = dp(8)
+            })
+        }
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -1419,7 +1453,9 @@ class MainActivity : UiKitActivity() {
             setBackgroundColor(white)
         }
         val composer = EditText(this).apply {
-            hint = "Message nearby…"
+            hint = if (keyChanged) "Messaging paused · identity key changed" else "Message nearby…"
+            isEnabled = !keyChanged
+            alpha = if (keyChanged) 0.55f else 1f
             textSize = 14f
             setTextColor(ink)
             setHintTextColor(0xFF98A2B3.toInt())
@@ -1433,8 +1469,8 @@ class MainActivity : UiKitActivity() {
             }
         }
         currentComposer = composer
-        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(4) })
-        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(5) })
+        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }.apply { isEnabled = !keyChanged }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(4) })
+        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }.apply { isEnabled = !keyChanged }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(5) })
         composerShell.addView(composer, LinearLayout.LayoutParams(0, -2, 1f))
         val send = TextView(this).apply {
             text = "↑"
@@ -1447,6 +1483,8 @@ class MainActivity : UiKitActivity() {
             minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
+            isEnabled = !keyChanged
+            alpha = if (keyChanged) 0.55f else 1f
             setOnClickListener { sendComposerMessage() }
         }
         composerShell.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(5) })
@@ -1470,6 +1508,10 @@ class MainActivity : UiKitActivity() {
     private fun launchVideoCapture() = launchCapture(video = true)
 
     private fun launchCapture(video: Boolean) {
+        if (isContactKeyChanged(activeChatId)) {
+            Toast.makeText(this, "Media blocked: this contact's identity key changed.", Toast.LENGTH_LONG).show()
+            return
+        }
         if (activeChatId.isNullOrBlank()) {
             Toast.makeText(this, "Open a conversation before capturing media.", Toast.LENGTH_SHORT).show()
             return
@@ -2281,6 +2323,10 @@ class MainActivity : UiKitActivity() {
 
     private fun sendComposerMessage() {
         val peerId = activeChatId ?: return
+        if (isContactKeyChanged(peerId)) {
+            Toast.makeText(this, "Message blocked: this contact's identity key changed. Verify out of band before continuing.", Toast.LENGTH_LONG).show()
+            return
+        }
         val input = currentComposer ?: return
         val text = input.text.toString().trim()
         if (text.isEmpty()) return
@@ -2321,29 +2367,89 @@ class MainActivity : UiKitActivity() {
         }
     }
 
+    private fun identityVerificationStatus(nodeId: String?): String {
+        if (nodeId.isNullOrBlank()) return "Unverified"
+        if (keyChangedContacts.contains(nodeId) || preferences.getBoolean(KEY_CHANGED_KEY_PREFIX + nodeId, false)) {
+            return "Key changed"
+        }
+        val fingerprint = meshSecurity.fingerprintFor(nodeId) ?: return "Unverified"
+        val verified = preferences.getString(VERIFIED_FINGERPRINT_PREFIX + nodeId, null)
+        return if (verified == fingerprint) "Verified" else "Unverified"
+    }
+
+    private fun isContactKeyChanged(peerId: String?): Boolean {
+        val nodeId = peerId?.let { resolveTargetNode(it) } ?: return false
+        return identityVerificationStatus(nodeId) == "Key changed"
+    }
+
+    private fun recordKeyChanged(nodeId: String) {
+        if (nodeId.isBlank()) return
+        mainHandler.post {
+            keyChangedContacts.add(nodeId)
+            preferences.edit().putBoolean(KEY_CHANGED_KEY_PREFIX + nodeId, true).apply()
+            val activeNode = activeChatId?.let { resolveTargetNode(it) }
+            if ((currentScreen == Screen.CHAT && activeNode == nodeId) || currentScreen == Screen.CHATS) {
+                render()
+            }
+        }
+    }
+
+    private fun markContactVerified(nodeId: String, fingerprint: String) {
+        if (identityVerificationStatus(nodeId) == "Key changed") {
+            Toast.makeText(this, "A changed identity key cannot be verified from this screen.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val current = meshSecurity.fingerprintFor(nodeId)
+        if (current.isNullOrBlank() || current != fingerprint) {
+            Toast.makeText(this, "The peer fingerprint changed. Re-open peer info before verifying.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!preferences.edit().putString(VERIFIED_FINGERPRINT_PREFIX + nodeId, fingerprint).commit()) {
+            Toast.makeText(this, "Could not save this verification on the device.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Fingerprint marked as verified on this device.", Toast.LENGTH_SHORT).show()
+        render()
+    }
+
     private fun showPeerInfo() {
         val peer = activeChatId ?: return
         val nodeId = if (peer.startsWith(MESH_PREFIX)) peer.removePrefix(MESH_PREFIX) else nodeForTransport(peer)
         val fingerprint = nodeId?.let { meshSecurity.fingerprintFor(it) }
+        val status = identityVerificationStatus(nodeId)
+        val keyChanged = status == "Key changed"
         val route = nodeId?.let { meshRoutes[it] }
         val transport = when {
             peer.startsWith(MESH_PREFIX) && route != null && route.hops > 1 -> "Morta Mesh relay · ${route.hops} hops"
             peer.startsWith(WIFI_PREFIX) -> "Wi-Fi Direct"
             else -> "Bluetooth LE / nearby"
         }
-        val detail = if (fingerprint != null) {
-            "${nameFor(peer)}\n$transport\n\nIdentity fingerprint (compare the full value with your contact through another trusted channel):\n$fingerprint"
-        } else {
-            "${nameFor(peer)}\n$transport\n\nIdentity fingerprint is not available yet. Keep both apps open while identities exchange."
+        val groupedFingerprint = fingerprint?.filterNot { it.isWhitespace() }?.chunked(5)?.joinToString(" ")
+        val detail = buildString {
+            append(nameFor(peer)).append("\n").append(transport)
+            append("\n\nIdentity status: ").append(status)
+            if (keyChanged) {
+                append("\n\nThis peer is advertising a different identity key. Messages to this contact are blocked. The new key is not trusted or automatically accepted.")
+            } else if (groupedFingerprint != null) {
+                append("\n\nSHA-256 fingerprint (compare all groups with your contact through another trusted channel before marking verified):\n")
+                append(groupedFingerprint)
+            } else {
+                append("\n\nIdentity fingerprint is not available yet. Keep both apps open while identities exchange.")
+            }
         }
         val dialog = AlertDialog.Builder(this)
             .setTitle("Peer identity")
             .setMessage(detail)
             .setPositiveButton("Close", null)
-        if (fingerprint != null) dialog.setNeutralButton("Copy fingerprint") { _, _ ->
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Morta Mesh fingerprint", fingerprint))
-            Toast.makeText(this, "Fingerprint copied", Toast.LENGTH_SHORT).show()
+        if (fingerprint != null) {
+            dialog.setNeutralButton("Copy pinned fingerprint") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Morta Mesh fingerprint", groupedFingerprint))
+                Toast.makeText(this, "Pinned fingerprint copied", Toast.LENGTH_SHORT).show()
+            }
+        }
+        if (fingerprint != null && nodeId != null && !keyChanged && status != "Verified") {
+            dialog.setNegativeButton("Mark as verified") { _, _ -> markContactVerified(nodeId, fingerprint) }
         }
         dialog.show()
     }
@@ -2812,7 +2918,10 @@ class MainActivity : UiKitActivity() {
                         }
                         when (meshSecurity.acceptIdentity(identity)) {
                             MeshSecurity.IdentityResult.ACCEPTED -> Unit
-                            MeshSecurity.IdentityResult.KEY_CHANGED -> throw java.io.IOException("Wi-Fi peer identity key changed")
+                            MeshSecurity.IdentityResult.KEY_CHANGED -> {
+                                recordKeyChanged(identity.optString("node"))
+                                throw java.io.IOException("Wi-Fi peer identity key changed")
+                            }
                             MeshSecurity.IdentityResult.INVALID -> throw java.io.IOException("Wi-Fi peer identity could not be pinned")
                         }
                         val peerId = resolvedPeerId ?: throw java.io.IOException("Authenticated Wi-Fi peer has no transport ID")
@@ -3587,7 +3696,10 @@ class MainActivity : UiKitActivity() {
                 mainHandler.post {
                     when (result) {
                         MeshSecurity.IdentityResult.ACCEPTED -> applyIdentityAdvertisement(sourcePeerId, ttl, advertId, hops, record)
-                        MeshSecurity.IdentityResult.KEY_CHANGED -> Toast.makeText(this, "Blocked a peer whose identity key changed. Verify this contact out of band.", Toast.LENGTH_LONG).show()
+                        MeshSecurity.IdentityResult.KEY_CHANGED -> {
+                            recordKeyChanged(record.optString("node"))
+                            Toast.makeText(this, "Blocked a peer whose identity key changed. Verify this contact out of band.", Toast.LENGTH_LONG).show()
+                        }
                         MeshSecurity.IdentityResult.INVALID -> Unit
                     }
                 }
