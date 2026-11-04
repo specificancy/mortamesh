@@ -532,11 +532,13 @@ class MainActivity : UiKitActivity() {
             background = rounded(0xFFEDF4FF.toInt(), 24)
             setPadding(dp(20), dp(22), dp(20), dp(20))
             addView(label("Your people,\nwithin reach.", 28f, 0xFF12315B.toInt(), true))
-            addView(label("Text messages use available nearby links. Photos use Bluetooth; videos use Wi-Fi Direct only. Unsent media stays queued for its intended recipient.", 14f, 0xFF46607E.toInt()).apply {
+            addView(label("Find nearby people and start private, end-to-end encrypted conversations. Unsent media stays queued for its intended recipient.", 14f, 0xFF46607E.toInt()).apply {
                 setLineSpacing(dp(3).toFloat(), 1f)
                 setPadding(0, dp(12), 0, dp(18))
             })
             addView(primaryButton(if (isScanning || wifiDiscovering) "Searching nearby…" else "Find nearby devices") { ensureBluetoothPermissionsAndStart() })
+            addView(vSpace(8))
+            addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
             addView(vSpace(10))
             addView(secondaryButton("Open conversations") { currentScreen = Screen.CHATS; render() })
         }
@@ -590,9 +592,7 @@ class MainActivity : UiKitActivity() {
         addSectionTitle(p, "Nearby devices", if (isScanning || wifiDiscovering) "Searching over both nearby transports…" else "Choose the faster Wi-Fi Direct link or Bluetooth LE")
         addPermissionsNeededCard(p)
         p.addView(vSpace(14))
-        val explainer = card()
-        explainer.addView(label("Text uses available nearby links. Photos always use Bluetooth LE; videos use Wi-Fi Direct only. Unsent media waits in the Private Vault queue for its intended recipient. Both phones need Morta Mesh open. Compare fingerprints in Peer info before sharing sensitive content.", 13f, muted).apply { setLineSpacing(dp(3).toFloat(), 1f) })
-        p.addView(explainer)
+        p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         p.addView(vSpace(16))
         if (wifiPeers.isEmpty()) {
             p.addView(label("WI-FI DIRECT · HIGHER SPEED", 10f, blue, true).apply { letterSpacing = .08f })
@@ -1167,6 +1167,53 @@ class MainActivity : UiKitActivity() {
         }
     }
 
+    private fun confirmDeleteVaultItem(item: PrivateVault.Item) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete private media?")
+            .setMessage("${item.fileName} will be removed from this device's private vault.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                if (!privateVault.delete(item)) {
+                    Toast.makeText(this, "The vault item could not be deleted.", Toast.LENGTH_LONG).show()
+                }
+                render()
+            }
+            .show()
+    }
+
+    /** One reusable bottom sheet explains the private-media transport rule without repeating it on every screen. */
+    private fun showMediaTravelInfo() {
+        val dialog = Dialog(this)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(22), dp(22), dp(24))
+            background = rounded(white, 22, border)
+            addView(label("How media travels", 20f, ink, true))
+            addView(label("PRIVATE CHAT", 11f, blue, true).apply { setPadding(0, dp(16), 0, dp(5)) })
+            addView(label("Text uses an available nearby encrypted link. Photos use Bluetooth LE only. Videos use Wi-Fi Direct only. Media is sent directly to its intended recipient and is never relayed through other mesh devices.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(label("PRIVATE VAULT", 11f, blue, true).apply { setPadding(0, dp(14), 0, dp(5)) })
+            addView(label("If the required direct link is unavailable, encrypted media stays queued in the Private Vault until the recipient can reconnect. Previews are available only after the Vault is unlocked.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(label("SEPARATE SPACES", 11f, blue, true).apply { setPadding(0, dp(14), 0, dp(5)) })
+            addView(label("World Chat posts are public to connected mesh devices. Anonymous group submissions remain encrypted local drafts; they are not published or uploaded.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(vSpace(16))
+            addView(primaryButton("Got it") { dialog.dismiss() })
+        }
+        dialog.setContentView(sheet)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(rounded(white, 22))
+            setLayout(-1, -2)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
     private fun buildVault(): View {
         val p = page()
         addBrandHeader(p, if (vaultUnlocked) "Lock" else "Unlock") {
@@ -1227,8 +1274,10 @@ class MainActivity : UiKitActivity() {
             empty.gravity = Gravity.CENTER_HORIZONTAL
             empty.setPadding(dp(18), dp(24), dp(18), dp(24))
             empty.addView(label("Your vault is empty", 16f, ink, true).apply { gravity = Gravity.CENTER })
-            empty.addView(label("Photos use Bluetooth. Videos use Wi-Fi Direct only. Unsent items stay queued here until their intended recipient reconnects.", 13f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) })
+            empty.addView(label("No private media yet. Captured and received items are encrypted here and never added to your Gallery.", 13f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) })
             p.addView(empty)
+            p.addView(vSpace(10))
+            p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         } else {
             items.forEach { item ->
                 val row = card().apply {
@@ -1239,14 +1288,7 @@ class MainActivity : UiKitActivity() {
                     isFocusable = true
                     setOnClickListener { openPrivateMedia(item) }
                     setOnLongClickListener {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Delete private media?")
-                            .setMessage("${item.fileName} will be removed from this device's private vault.")
-                            .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Delete") { _, _ ->
-                                privateVault.delete(item)
-                                render()
-                            }.show()
+                        confirmDeleteVaultItem(item)
                         true
                     }
                 }
@@ -1270,6 +1312,12 @@ class MainActivity : UiKitActivity() {
                 }
                 col.addView(label(transferLabel, 11f, if (item.transferState == "QUEUED") blue else muted).apply { setPadding(0, dp(3), 0, 0) })
                 col.addView(label(java.text.SimpleDateFormat("dd MMM · HH:mm", Locale.getDefault()).format(java.util.Date(item.createdAt)), 11f, muted).apply { setPadding(0, dp(3), 0, 0) })
+                col.addView(secondaryButton("Delete") { confirmDeleteVaultItem(item) }.apply {
+                    setTextColor(0xFFB42318.toInt())
+                    background = rounded(0xFFFFEDEC.toInt(), 10)
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(6)
+                })
                 if (item.direction == "Sent" && item.recipientId.isNullOrBlank() &&
                     item.transferId.isNullOrBlank() && item.transferState.isBlank()) {
                     col.addView(secondaryButton("Retry delivery") { retryLegacyVaultItem(item) }.apply {
