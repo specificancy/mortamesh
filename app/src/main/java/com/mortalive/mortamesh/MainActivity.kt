@@ -160,7 +160,16 @@ class MainActivity : UiKitActivity() {
     private var worldLinkStatus: TextView? = null
 
     private data class NearbyPeer(val device: BluetoothDevice, var name: String, var lastSeen: Long = System.currentTimeMillis())
-    private data class ChatMessage(val text: String, val mine: Boolean, val timestamp: Long = System.currentTimeMillis())
+    private data class ChatMessage(
+        val text: String,
+        val mine: Boolean,
+        val timestamp: Long = System.currentTimeMillis(),
+        val mediaMimeType: String? = null,
+        val mediaSize: Long = 0L,
+        val deliveryState: String? = null,
+        val requiredTransport: String? = null,
+        val transferId: String? = null
+    )
     private data class MeshRoute(val nodeId: String, val name: String, val nextHop: String, val hops: Int, val lastSeen: Long = System.currentTimeMillis())
     private data class IncomingTextFragments(val total: Int, val parts: MutableMap<Int, String>, val createdAt: Long)
     private val nearbyPeers = linkedMapOf<String, NearbyPeer>()
@@ -1559,12 +1568,22 @@ class MainActivity : UiKitActivity() {
                 if (preparedFile != plainFile) preparedFile.delete()
                 plainFile.delete()
 
+                val requiredTransport = if (preparedMime.startsWith("video/")) "Wi-Fi Direct" else "Bluetooth LE"
+                runOnUiThread {
+                    appendMessage(peerId, ChatMessage(
+                        text = if (preparedMime.startsWith("video/")) "Video" else "Photo",
+                        mine = true,
+                        mediaMimeType = preparedMime,
+                        mediaSize = item.size,
+                        deliveryState = "QUEUED",
+                        requiredTransport = requiredTransport,
+                        transferId = transferId
+                    ))
+                }
+
                 val target = chooseMediaTransport(recipient, preparedMime)
                 if (target == null) {
                     runOnUiThread {
-                        appendMessage(peerId, ChatMessage(
-                            "🔒 ${if (isVideo) "Video" else "Photo"} queued · waiting for ${if (isVideo) "Wi-Fi Direct" else "Bluetooth"}", true
-                        ))
                         Toast.makeText(
                             this,
                             "${if (isVideo) "Video needs Wi-Fi Direct" else "Photo uses Bluetooth"}; the encrypted item is queued for $peerName. It will send when that recipient is directly connected on that link type (media is never relayed).",
@@ -1702,6 +1721,7 @@ class MainActivity : UiKitActivity() {
                 if (privateVault.updateTransferState(item.id, "SENDING") == null) {
                     throw java.io.IOException("Could not persist transfer state in the vault")
                 }
+                updateChatMediaState(item.chatPeerId, transferId, "SENDING")
                 val chunkSize = if (wifi) MEDIA_WIFI_CHUNK_BYTES else MEDIA_BLE_CHUNK_BYTES
                 val start = listOf(
                     MEDIA_WIRE_PREFIX + "S", transferId,
@@ -1747,8 +1767,10 @@ class MainActivity : UiKitActivity() {
                 val delivered = privateVault.transferById(transferId)?.transferState == "DELIVERED"
                 runOnUiThread {
                     if (delivered && failure == null) {
+                        updateChatMediaState(item.chatPeerId, transferId, "DELIVERED")
                         Toast.makeText(this, "${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} delivered to ${item.peerName}.", Toast.LENGTH_LONG).show()
                     } else if (!delivered && failure != null) {
+                        updateChatMediaState(item.chatPeerId, transferId, "QUEUED")
                         Toast.makeText(this, "Media remains queued for ${item.peerName}: ${failure.message ?: "connection interrupted"}. It will retry when the recipient is reachable.", Toast.LENGTH_LONG).show()
                     }
                     if (currentScreen == Screen.VAULT) render()
@@ -2027,7 +2049,15 @@ class MainActivity : UiKitActivity() {
                     // finish() returns only after the receiver's encrypted file and index commit.
                     sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|${session.writer.transferId}", strict = false)
                     runOnUiThread {
-                        appendMessage(peerId, ChatMessage("🔒 ${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} received · saved in Private Vault", false))
+                        appendMessage(peerId, ChatMessage(
+                            text = if (item.mimeType.startsWith("video/")) "Video" else "Photo",
+                            mine = false,
+                            mediaMimeType = item.mimeType,
+                            mediaSize = item.size,
+                            deliveryState = "RECEIVED",
+                            requiredTransport = if (item.mimeType.startsWith("video/")) "Wi-Fi Direct" else "Bluetooth LE",
+                            transferId = item.transferId
+                        ))
                         if (currentScreen == Screen.VAULT) render()
                         Toast.makeText(this, "Received and saved in Private Vault.", Toast.LENGTH_LONG).show()
                     }
@@ -2042,7 +2072,7 @@ class MainActivity : UiKitActivity() {
                     mediaAckWaiters[transferId]?.countDown()
                     if (firstReceipt) runOnUiThread {
                         val chatId = item.chatPeerId ?: item.recipientId ?: peerId
-                        appendMessage(chatId, ChatMessage("✓ ${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} delivered to ${item.peerName}", true))
+                        updateChatMediaState(chatId, transferId, "DELIVERED")
                         if (currentScreen == Screen.VAULT) render()
                     }
                 }
@@ -2298,15 +2328,81 @@ class MainActivity : UiKitActivity() {
             setPadding(dp(13), dp(10), dp(13), dp(8))
             background = rounded(if (message.mine) blue else white, 17, if (message.mine) null else border)
         }
-        val text = label(message.text, 14f, if (message.mine) white else ink)
-        text.setLineSpacing(dp(2).toFloat(), 1f)
-        bubble.addView(text)
-        bubble.addView(label(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)), 9f, if (message.mine) 0xFFD9E8FF.toInt() else muted).apply {
+        if (!message.mediaMimeType.isNullOrBlank()) {
+            val isVideo = message.mediaMimeType.startsWith("video/")
+            val mediaRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            mediaRow.addView(label(if (isVideo) "▶" else "▧", 22f, if (message.mine) white else blue, true).apply {
+                gravity = Gravity.CENTER
+                background = rounded(if (message.mine) 0xFF3D8BF4.toInt() else blueLight, 10)
+                minimumWidth = dp(44)
+                minimumHeight = dp(44)
+            })
+            val detail = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(10), 0, 0, 0)
+            }
+            val mediaName = if (isVideo) "Video" else "Photo"
+            detail.addView(label("$mediaName · ${formatBytes(message.mediaSize)}", 13f, if (message.mine) white else ink, true))
+            val stateText = when (message.deliveryState) {
+                "QUEUED" -> "Queued · needs ${message.requiredTransport ?: "nearby link"}"
+                "SENDING" -> "Sending · ${message.requiredTransport ?: "nearby link"}"
+                "DELIVERED" -> "Delivered"
+                "RECEIVED" -> "Received · saved in Private Vault"
+                else -> "Saved in Private Vault"
+            }
+            val stateColor = when (message.deliveryState) {
+                "DELIVERED", "RECEIVED" -> if (message.mine) 0xFFD7FBE9.toInt() else green
+                "QUEUED" -> if (message.mine) 0xFFFFE3B8.toInt() else 0xFF9A6700.toInt()
+                else -> if (message.mine) 0xFFD9E8FF.toInt() else muted
+            }
+            detail.addView(label(stateText, 11f, stateColor).apply { setPadding(0, dp(4), 0, 0) })
+            mediaRow.addView(detail, LinearLayout.LayoutParams(0, -2, 1f))
+            bubble.addView(mediaRow)
+            bubble.contentDescription = "$mediaName, ${formatBytes(message.mediaSize)}. $stateText. Open in Private Vault."
+            bubble.isClickable = true
+            bubble.isFocusable = true
+            bubble.setOnClickListener {
+                val transferId = message.transferId
+                val item = transferId?.let { privateVault.transferById(it) }
+                if (item != null) openPrivateMedia(item)
+                else Toast.makeText(this, "This media item is no longer in the Private Vault.", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            val text = label(message.text, 14f, if (message.mine) white else ink)
+            text.setLineSpacing(dp(2).toFloat(), 1f)
+            bubble.addView(text)
+            if (message.mine && message.deliveryState == "SENT_TO_LINK") {
+                bubble.addView(label("Sent to nearby link · not a delivery receipt", 11f, 0xFFD9E8FF.toInt()).apply {
+                    gravity = Gravity.END
+                    setPadding(0, dp(5), 0, 0)
+                })
+            }
+        }
+        bubble.addView(label(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)), 11f, if (message.mine) 0xFFD9E8FF.toInt() else muted).apply {
             gravity = Gravity.END
             setPadding(0, dp(6), 0, 0)
         })
         line.addView(bubble, LinearLayout.LayoutParams(-2, -2).apply { width = minOf(dp(290), (resources.displayMetrics.widthPixels * .78f).toInt()) })
         return line
+    }
+
+    private fun updateChatMediaState(peerId: String?, transferId: String, state: String) {
+        if (peerId.isNullOrBlank()) return
+        mainHandler.post {
+            val messages = chatHistory[peerId] ?: return@post
+            val index = messages.indexOfLast { it.transferId == transferId }
+            if (index < 0) return@post
+            messages[index] = messages[index].copy(deliveryState = state)
+            saveHistory()
+            if (currentScreen == Screen.CHAT && activeChatId == peerId) {
+                chatColumn?.removeAllViews()
+                messages.forEach { chatColumn?.addView(messageBubble(it)) }
+                chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
     }
 
     private fun appendMessage(peerId: String, message: ChatMessage) {
@@ -2344,7 +2440,7 @@ class MainActivity : UiKitActivity() {
             return
         }
         input.text.clear()
-        appendMessage(peerId, ChatMessage(text, true))
+        appendMessage(peerId, ChatMessage(text, true, deliveryState = "SENT_TO_LINK"))
     }
 
     private fun openChat(peerId: String) {
@@ -4122,7 +4218,16 @@ class MainActivity : UiKitActivity() {
             for (i in 0 until array.length()) {
                 val o = array.getJSONObject(i)
                 val id = o.getString("peer")
-                val item = ChatMessage(o.getString("text"), o.getBoolean("mine"), o.optLong("time", System.currentTimeMillis()))
+                val item = ChatMessage(
+                    text = o.getString("text"),
+                    mine = o.getBoolean("mine"),
+                    timestamp = o.optLong("time", System.currentTimeMillis()),
+                    mediaMimeType = o.optString("mediaMimeType").takeIf { it.isNotBlank() },
+                    mediaSize = o.optLong("mediaSize", 0L),
+                    deliveryState = o.optString("deliveryState").takeIf { it.isNotBlank() },
+                    requiredTransport = o.optString("requiredTransport").takeIf { it.isNotBlank() },
+                    transferId = o.optString("transferId").takeIf { it.isNotBlank() }
+                )
                 chatHistory.getOrPut(id) { mutableListOf() }.add(item)
             }
             if (encryptedHistory == null && legacyHistory != null) {
@@ -4151,7 +4256,18 @@ class MainActivity : UiKitActivity() {
         if (chatHistoryStorageLocked) return
         val array = JSONArray()
         chatHistory.forEach { (peer, messages) -> messages.takeLast(250).forEach { msg ->
-            array.put(JSONObject().put("peer", peer).put("text", msg.text).put("mine", msg.mine).put("time", msg.timestamp))
+            array.put(
+                JSONObject()
+                    .put("peer", peer)
+                    .put("text", msg.text)
+                    .put("mine", msg.mine)
+                    .put("time", msg.timestamp)
+                    .put("mediaMimeType", msg.mediaMimeType ?: "")
+                    .put("mediaSize", msg.mediaSize)
+                    .put("deliveryState", msg.deliveryState ?: "")
+                    .put("requiredTransport", msg.requiredTransport ?: "")
+                    .put("transferId", msg.transferId ?: "")
+            )
         } }
         if (encryptedChatStore.writeText(array.toString())) {
             // Remove the old plaintext SharedPreferences copy after the encrypted file is committed.
