@@ -159,6 +159,7 @@ class MainActivity : UiKitActivity() {
     private var worldComposer: EditText? = null
     private var worldCharCounter: TextView? = null
     private var worldLinkStatus: TextView? = null
+    private var worldPostFeedback: TextView? = null
 
     private data class NearbyPeer(val device: BluetoothDevice, var name: String, var lastSeen: Long = System.currentTimeMillis())
     private data class ChatMessage(
@@ -503,6 +504,7 @@ class MainActivity : UiKitActivity() {
         worldComposer = null
         worldCharCounter = null
         worldLinkStatus = null
+        worldPostFeedback = null
         val previousScrollY = if (scrollableScreenId == currentScreen) scrollableScreen?.scrollY ?: 0 else 0
         content.removeAllViews()
         val view = when (currentScreen) {
@@ -1052,11 +1054,21 @@ class MainActivity : UiKitActivity() {
             isFocusable = true
             setOnClickListener { sendWorldChatPost() }
         }
-        inputRow.addView(send, LinearLayout.LayoutParams(dp(42), dp(42)).apply { leftMargin = dp(7) })
+        inputRow.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(7) })
         composerShell.addView(inputRow)
         composerShell.addView(label("500 characters max · public and signed · no media in World Chat", 10f, muted).apply {
             setPadding(dp(2), dp(6), 0, 0)
         })
+        val publicNotice = label("PUBLIC · ANYONE IN RANGE CAN READ", 11f, 0xFFB42318.toInt(), true).apply {
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+            contentDescription = "Public World Chat. Anyone in range can read posts."
+        }
+        composerShell.addView(publicNotice, 0)
+        worldPostFeedback = label("", 12f, 0xFFB42318.toInt(), true).apply {
+            visibility = View.GONE
+            setPadding(dp(4), dp(5), dp(4), dp(4))
+        }
+        composerShell.addView(worldPostFeedback, 1)
         wrapper.addView(composerShell, LinearLayout.LayoutParams(-1, -2))
         return wrapper
     }
@@ -1124,16 +1136,25 @@ class MainActivity : UiKitActivity() {
         }
         when (worldChatStore.insertIfNew(post)) {
             WorldChatStore.InsertResult.RATE_LIMITED -> {
+                worldPostFeedback?.apply {
+                    text = "Rate limit reached · wait before posting again (maximum 5 posts per minute)."
+                    visibility = View.VISIBLE
+                }
                 Toast.makeText(this, "World Chat allows up to 5 posts per minute.", Toast.LENGTH_LONG).show()
                 return
             }
             WorldChatStore.InsertResult.STORAGE_ERROR -> {
+                worldPostFeedback?.apply {
+                    text = "This post could not be saved safely, so it was not broadcast."
+                    visibility = View.VISIBLE
+                }
                 Toast.makeText(this, "The post could not be saved safely. It was not broadcast.", Toast.LENGTH_LONG).show()
                 return
             }
             WorldChatStore.InsertResult.DUPLICATE -> return
             WorldChatStore.InsertResult.INSERTED -> Unit
         }
+        worldPostFeedback?.visibility = View.GONE
         input.text.clear()
         renderWorldTimeline()
         val sent = broadcastWorldPost(post, null)
@@ -2319,6 +2340,7 @@ class MainActivity : UiKitActivity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "${peer.name}, ${if (clientReady.contains(peer.device.address) || subscribedDevices.contains(peer.device.address)) "connected" else "nearby device"}. Double tap to chat."
             setOnClickListener { openChat(peer.device.address) }
         }
         row.addView(AvatarView(this, peer.name), LinearLayout.LayoutParams(dp(46), dp(46)))
@@ -2343,6 +2365,7 @@ class MainActivity : UiKitActivity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "$displayName, ${if (connected) "connected over Wi-Fi Direct" else "nearby over Wi-Fi Direct"}. Double tap to chat."
             setOnClickListener {
                 peerNames[chatId] = displayName
                 persistPeerNames()
@@ -2365,6 +2388,7 @@ class MainActivity : UiKitActivity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "${route.name}, relayed through ${route.hops} hops with end-to-end encryption. Double tap to chat."
             setOnClickListener { openChat(id) }
             addView(AvatarView(this@MainActivity, route.name), LinearLayout.LayoutParams(dp(46), dp(46)))
             val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(4), 0) }
