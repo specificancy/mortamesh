@@ -559,7 +559,10 @@ class MainActivity : UiKitActivity() {
         statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(28), dp(28)))
         val statusColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         statusColumn.addView(label(if (online) "Nearby discovery is active" else "Nearby discovery is off", 14f, ink, true))
-        statusColumn.addView(label("Photos · Bluetooth\nVideos · Wi-Fi Direct", 12f, muted).apply { setPadding(0, dp(4), 0, 0) })
+        statusColumn.addView(label(
+            if (online) "Nearby discovery is active" else "No nearby search is running",
+            12f, muted
+        ).apply { setPadding(0, dp(4), 0, 0) })
         statusRow.addView(statusColumn, LinearLayout.LayoutParams(0, -2, 1f))
         status.addView(statusRow)
         p.addView(status)
@@ -965,17 +968,20 @@ class MainActivity : UiKitActivity() {
         }
         top.addView(label("‹", 32f, blue, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(3), 0, dp(12), 0)
+            contentDescription = "Back to conversations"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
             setOnClickListener { currentScreen = Screen.CHATS; render() }
-        }, LinearLayout.LayoutParams(dp(38), dp(44)))
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         val titleColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleColumn.addView(label("World Chat", 16f, ink, true))
         titleColumn.addView(label("PUBLIC · MESH BROADCAST", 9.5f, muted, true).apply { letterSpacing = .06f; setPadding(0, dp(4), 0, 0) })
         top.addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(label("●", 13f, if (connectedTransportIds().isNotEmpty()) green else muted))
-        wrapper.addView(top, LinearLayout.LayoutParams(-1, dp(64)))
+        top.minimumHeight = dp(64)
+        wrapper.addView(top, LinearLayout.LayoutParams(-1, -2))
 
         val explainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2440,7 +2446,15 @@ class MainActivity : UiKitActivity() {
                 "QUEUED" -> if (message.mine) 0xFFFFE3B8.toInt() else 0xFF9A6700.toInt()
                 else -> if (message.mine) 0xFFD9E8FF.toInt() else muted
             }
-            detail.addView(label(stateText, 11f, stateColor).apply { setPadding(0, dp(4), 0, 0) })
+            val stateBackground = when (message.deliveryState) {
+                "DELIVERED", "RECEIVED" -> 0xFFE6F8EF.toInt()
+                "QUEUED" -> 0xFFFFF4E5.toInt()
+                else -> if (message.mine) 0xFF3D8BF4.toInt() else 0xFFF2F4F7.toInt()
+            }
+            detail.addView(label(stateText, 11f, stateColor).apply {
+                background = rounded(stateBackground, 99)
+                setPadding(dp(7), dp(4), dp(7), dp(4))
+            })
             mediaRow.addView(detail, LinearLayout.LayoutParams(0, -2, 1f))
             bubble.addView(mediaRow)
             bubble.contentDescription = "$mediaName, ${formatBytes(message.mediaSize)}. $stateText. Open in Private Vault."
