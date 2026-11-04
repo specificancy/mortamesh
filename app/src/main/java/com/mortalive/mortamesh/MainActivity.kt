@@ -133,6 +133,7 @@ class MainActivity : UiKitActivity() {
     private var lastPeerRenderAt = 0L
     private var scrollableScreen: ScrollView? = null
     private var scrollableScreenId: Screen? = null
+    private var permissionsPermanentlyDenied = false
     private var statusText = "Not connected"
     private var chatColumn: LinearLayout? = null
     private var chatScroll: ScrollView? = null
@@ -307,6 +308,7 @@ class MainActivity : UiKitActivity() {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         }
         preferences = getSharedPreferences("morta_mesh_local", Context.MODE_PRIVATE)
+        permissionsPermanentlyDenied = preferences.getBoolean("nearby_permissions_permanently_denied", false)
         preferences.all.keys
             .filter { it.startsWith(KEY_CHANGED_KEY_PREFIX) && preferences.getBoolean(it, false) }
             .forEach { keyChangedContacts.add(it.removePrefix(KEY_CHANGED_KEY_PREFIX)) }
@@ -350,12 +352,13 @@ class MainActivity : UiKitActivity() {
             setBackgroundColor(white)
             elevation = dp(8).toFloat()
             setPadding(dp(8), dp(4), dp(8), dp(4))
+            minimumHeight = dp(64)
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(this@MainActivity.background)
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-            addView(navBar, LinearLayout.LayoutParams(-1, dp(64)))
+            addView(navBar, LinearLayout.LayoutParams(-1, -2))
         }
         setContentView(root)
         render()
@@ -386,6 +389,11 @@ class MainActivity : UiKitActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (permissionsPermanentlyDenied && hasBluetoothRuntimePermissions() && hasWifiDirectRuntimePermission()) {
+            permissionsPermanentlyDenied = false
+            preferences.edit().putBoolean("nearby_permissions_permanently_denied", false).apply()
+            if (currentScreen == Screen.HOME || currentScreen == Screen.NEARBY) render()
+        }
         if (currentScreen == Screen.VAULT) render() else refreshNav()
         retryQueuedMedia()
     }
@@ -533,6 +541,7 @@ class MainActivity : UiKitActivity() {
             addView(secondaryButton("Open conversations") { currentScreen = Screen.CHATS; render() })
         }
         p.addView(hero)
+        addPermissionsNeededCard(p)
         p.addView(vSpace(18))
 
         val status = card()
@@ -579,6 +588,7 @@ class MainActivity : UiKitActivity() {
         val p = page()
         addBrandHeader(p, "Scan again") { ensureBluetoothPermissionsAndStart(forceRescan = true) }
         addSectionTitle(p, "Nearby devices", if (isScanning || wifiDiscovering) "Searching over both nearby transports…" else "Choose the faster Wi-Fi Direct link or Bluetooth LE")
+        addPermissionsNeededCard(p)
         p.addView(vSpace(14))
         val explainer = card()
         explainer.addView(label("Text uses available nearby links. Photos always use Bluetooth LE; videos use Wi-Fi Direct only. Unsent media waits in the Private Vault queue for its intended recipient. Both phones need Morta Mesh open. Compare fingerprints in Peer info before sharing sensitive content.", 13f, muted).apply { setLineSpacing(dp(3).toFloat(), 1f) })
@@ -2594,6 +2604,7 @@ class MainActivity : UiKitActivity() {
                     }
                 }
             }
+            item.minimumHeight = dp(64)
             item.contentDescription = "$title tab"
             item.isSelected = selected
             item.isActivated = selected
@@ -2603,13 +2614,36 @@ class MainActivity : UiKitActivity() {
                 gravity = Gravity.CENTER
                 contentDescription = title
                 setTextColor(if (selected) blue else 0xFF8A94A6.toInt())
-            }, LinearLayout.LayoutParams(-1, dp(28)))
+            }, LinearLayout.LayoutParams(-1, -2))
             item.addView(label(title, 11f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply {
                 gravity = Gravity.CENTER
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             })
             navBar.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
         }
+    }
+
+    private fun addPermissionsNeededCard(parent: LinearLayout) {
+        if (!permissionsPermanentlyDenied) return
+        val notice = card().apply {
+            addView(label("Permissions needed", 14f, ink, true))
+            addView(label("Nearby discovery is limited because an Android permission was denied permanently. You can continue using transports that are already allowed.", 12f, muted).apply {
+                setPadding(0, dp(5), 0, dp(10))
+                setLineSpacing(dp(2).toFloat(), 1f)
+            })
+            addView(secondaryButton("Open app settings") {
+                try {
+                    startActivity(Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    ))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "Could not open app settings.", Toast.LENGTH_LONG).show()
+                }
+            })
+        }
+        parent.addView(notice)
+        parent.addView(vSpace(10))
     }
 
     private var pendingForceRescan = false
@@ -2629,7 +2663,16 @@ class MainActivity : UiKitActivity() {
 
         val missing = needed.distinct().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), permissionRequestCode)
+            AlertDialog.Builder(this)
+                .setTitle("Allow nearby discovery")
+                .setMessage(
+                    "Bluetooth permission lets Morta Mesh find and connect to nearby phones. Nearby Wi-Fi permission enables Wi-Fi Direct links for faster media transfer. On older Android versions, the system may require Location permission or Location services for discovery. Morta Mesh does not collect or upload your GPS location. Messages and private media still use the app's peer-to-peer encrypted flows."
+                )
+                .setNegativeButton("Not now", null)
+                .setPositiveButton("Continue") { _, _ ->
+                    requestPermissions(missing.toTypedArray(), permissionRequestCode)
+                }
+                .show()
             return
         }
         startAvailableTransports(forceRescan)
@@ -2672,8 +2715,18 @@ class MainActivity : UiKitActivity() {
         if (requestCode == permissionRequestCode) {
             // Start whichever transport the user allowed; one denied permission should not disable the other transport.
             startAvailableTransports(pendingForceRescan)
-            if (grantResults.isEmpty() || grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
+            val denied = permissions.indices.filter { index ->
+                grantResults.getOrNull(index) != PackageManager.PERMISSION_GRANTED
+            }
+            permissionsPermanentlyDenied = denied.any { index ->
+                !shouldShowRequestPermissionRationale(permissions[index])
+            }
+            preferences.edit()
+                .putBoolean("nearby_permissions_permanently_denied", permissionsPermanentlyDenied)
+                .apply()
+            if (denied.isNotEmpty()) {
                 Toast.makeText(this, "You can still use whichever nearby transport has its permissions enabled.", Toast.LENGTH_LONG).show()
+                if (currentScreen == Screen.HOME || currentScreen == Screen.NEARBY) render()
             }
         }
     }
