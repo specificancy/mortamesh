@@ -1137,7 +1137,7 @@ class MainActivity : UiKitActivity() {
         when (worldChatStore.insertIfNew(post)) {
             WorldChatStore.InsertResult.RATE_LIMITED -> {
                 worldPostFeedback?.apply {
-                    text = "Rate limit reached · wait before posting again (maximum 5 posts per minute)."
+                    this.text = "Rate limit reached · wait before posting again (maximum 5 posts per minute)."
                     visibility = View.VISIBLE
                 }
                 Toast.makeText(this, "World Chat allows up to 5 posts per minute.", Toast.LENGTH_LONG).show()
@@ -1145,7 +1145,7 @@ class MainActivity : UiKitActivity() {
             }
             WorldChatStore.InsertResult.STORAGE_ERROR -> {
                 worldPostFeedback?.apply {
-                    text = "This post could not be saved safely, so it was not broadcast."
+                    this.text = "This post could not be saved safely, so it was not broadcast."
                     visibility = View.VISIBLE
                 }
                 Toast.makeText(this, "The post could not be saved safely. It was not broadcast.", Toast.LENGTH_LONG).show()
