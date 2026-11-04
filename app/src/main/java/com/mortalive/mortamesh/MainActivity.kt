@@ -2659,13 +2659,13 @@ class MainActivity : UiKitActivity() {
     private fun refreshNav() {
         if (!::navBar.isInitialized) return
         navBar.removeAllViews()
-        val items: List<Triple<Screen?, String, String>> = listOf(
-            Triple(Screen.HOME, "⌂", "Home"),
-            Triple(Screen.NEARBY, "◎", "Nearby"),
-            Triple(Screen.CHATS, "▤", "Chats"),
-            Triple(Screen.VAULT, "▣", "Vault"),
-            Triple(null, "₿", "Wallet"),
-            Triple(Screen.SETTINGS, "⚙", "Settings")
+        val items: List<Triple<Screen?, Int, String>> = listOf(
+            Triple(Screen.HOME, R.drawable.ic_nav_home, "Home"),
+            Triple(Screen.NEARBY, R.drawable.ic_nav_nearby, "Nearby"),
+            Triple(Screen.CHATS, R.drawable.ic_nav_chats, "Chats"),
+            Triple(Screen.VAULT, R.drawable.ic_nav_vault, "Vault"),
+            Triple(null, R.drawable.ic_nav_bitcoin, "Wallet"),
+            Triple(Screen.SETTINGS, R.drawable.ic_nav_settings, "Settings")
         )
         items.forEach { (screen, icon, title) ->
             val selected = screen != null && (
@@ -2694,13 +2694,13 @@ class MainActivity : UiKitActivity() {
             item.contentDescription = "$title tab"
             item.isSelected = selected
             item.isActivated = selected
-            item.addView(TextView(this).apply {
-                text = icon
-                textSize = 21f
-                gravity = Gravity.CENTER
-                contentDescription = title
-                setTextColor(if (selected) blue else 0xFF8A94A6.toInt())
-            }, LinearLayout.LayoutParams(-1, -2))
+            item.addView(ImageView(this).apply {
+                setImageResource(icon)
+                setColorFilter(if (selected) blue else 0xFF8A94A6.toInt())
+                contentDescription = null
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }, LinearLayout.LayoutParams(dp(24), dp(24)))
             item.addView(label(title, 11f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply {
                 gravity = Gravity.CENTER
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
