@@ -49,7 +49,10 @@ class WalletActivity : Activity() {
         engine = BitcoinTestnetWalletEngine(this)
         walletExists = engine.hasWallet()
         render()
-        if (walletExists) openSavedWallet()
+        if (walletExists) {
+            openSavedWallet()
+            showPendingBackupIfNeeded()
+        }
     }
 
     override fun onDestroy() {
@@ -243,17 +246,23 @@ class WalletActivity : Activity() {
             ).apply { setLineSpacing(dp(3).toFloat(), 1f); setPadding(0, 0, 0, dp(14)) })
             addView(words)
         }
-        AlertDialog.Builder(this)
-            .setTitle("Back up your recovery phrase")
-            .setView(message)
-            .setCancelable(false)
-            .setPositiveButton("I've written it down") { _, _ ->
-                // Clear the rendered secret immediately; JVM String instances are not deterministically zeroizable.
-                words.text = ""
-                syncText = "Recovery phrase saved in your offline backup"
-                render()
-            }
-            .show()
+        showSecureDialog(
+            AlertDialog.Builder(this)
+                .setTitle("Back up your recovery phrase")
+                .setView(message)
+                .setCancelable(false)
+                .setPositiveButton("I've written it down") { _, _ ->
+                    // Clear the rendered secret immediately; JVM String instances are not deterministically zeroizable.
+                    words.text = ""
+                    try {
+                        engine.acknowledgeBackup()
+                        syncText = "Recovery phrase saved in your offline backup"
+                    } catch (_: Exception) {
+                        errorText = "Could not record the backup confirmation. The phrase will be shown again next time."
+                    }
+                    render()
+                }
+        )
     }
 
     private fun showRestoreDialog() {
@@ -274,7 +283,7 @@ class WalletActivity : Activity() {
             ).apply { setPadding(0, 0, 0, dp(10)) })
             addView(input)
         }
-        AlertDialog.Builder(this)
+        val restoreBuilder = AlertDialog.Builder(this)
             .setTitle("Restore Bitcoin Testnet4 wallet")
             .setView(box)
             .setNegativeButton("Cancel", null)
@@ -291,7 +300,31 @@ class WalletActivity : Activity() {
                     syncText = "Wallet restored · Testnet4"
                 }
             }
-            .show()
+        showSecureDialog(restoreBuilder)
+    }
+
+    /** Dialogs are separate windows; the activity's FLAG_SECURE does not cover them. */
+    private fun showSecureDialog(builder: AlertDialog.Builder) {
+        if (isFinishing || isDestroyed) return
+        val dialog = builder.create()
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.show()
+    }
+
+    /** Re-offer a newly-created phrase if the user has not yet confirmed an offline backup. */
+    private fun showPendingBackupIfNeeded() {
+        try {
+            executor.execute {
+                val phrase = try {
+                    if (engine.isBackupPending()) engine.recoveryPhraseForBackup() else null
+                } catch (_: Exception) { null }
+                if (phrase != null) runOnUiThread {
+                    if (!isFinishing && !isDestroyed) showRecoveryPhrase(phrase)
+                }
+            }
+        } catch (_: Exception) {
+            // Activity is closing; no UI callback is needed.
+        }
     }
 
     private fun generateAddress() {
@@ -313,6 +346,7 @@ class WalletActivity : Activity() {
             engine.startSync(
                 onUpdate = { next ->
                     runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
                         snapshot = next
                         receiveAddress = next.receiveAddress
                         syncText = "Synced through block " + next.blockHeight
@@ -321,12 +355,14 @@ class WalletActivity : Activity() {
                 },
                 onStatus = { message ->
                     runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
                         syncText = message
                         render()
                     }
                 },
                 onError = { message ->
                     runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
                         syncing = false
                         syncText = "Sync stopped: " + message
                         render()
@@ -358,6 +394,7 @@ class WalletActivity : Activity() {
             try {
                 val result = action()
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
                     busy = false
                     busyText = ""
                     walletExists = engine.hasWallet()
@@ -366,6 +403,7 @@ class WalletActivity : Activity() {
                 }
             } catch (error: Throwable) {
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
                     busy = false
                     busyText = ""
                     walletExists = engine.hasWallet()
