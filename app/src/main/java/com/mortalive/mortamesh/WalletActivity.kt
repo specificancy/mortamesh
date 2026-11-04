@@ -37,6 +37,8 @@ class WalletActivity : UiKitActivity() {
     private var syncText = "Not synced"
     private var syncing = false
     private var receiveAddress = ""
+    private var backupPending = false
+    private var lastSyncedAt: Long? = null
     private var walletScrollView: ScrollView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +46,7 @@ class WalletActivity : UiKitActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         engine = BitcoinTestnetWalletEngine(this)
         walletExists = engine.hasWallet()
+        backupPending = engine.isBackupPending()
         render()
         if (walletExists) {
             openSavedWallet()
@@ -75,6 +78,22 @@ class WalletActivity : UiKitActivity() {
         top.addView(title, LinearLayout.LayoutParams(0, dp(44), 1f))
         top.addView(label("MORTA MESH", 9f, muted, true))
         root.addView(top)
+        if (backupPending) {
+            val backupBanner = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                background = rounded(0xFFFFF4E5.toInt(), 12, 0xFFF2C078.toInt())
+                addView(label("BACKUP PENDING", 11f, 0xFF8A4B08.toInt(), true))
+                addView(label("Your recovery phrase has not been confirmed as backed up. Complete the offline backup to keep your wallet recoverable.", 12f, 0xFF8A4B08.toInt()).apply {
+                    setPadding(0, dp(4), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                })
+            }
+            val bannerParams = LinearLayout.LayoutParams(-1, -2).apply {
+                leftMargin = dp(16); rightMargin = dp(16); bottomMargin = dp(8)
+            }
+            root.addView(backupBanner, bannerParams)
+        }
 
         val scroll = ScrollView(this).apply {
             setFillViewport(true)
@@ -125,13 +144,29 @@ class WalletActivity : UiKitActivity() {
             bitcoin.addView(primaryButton("Try opening saved wallet") { openSavedWallet() })
         } else {
             val current = snapshot
-            bitcoin.addView(label("BALANCE", 10f, muted, true).apply { setPadding(0, dp(7), 0, dp(4)) })
-            bitcoin.addView(label(current?.let { formatBtc(it.balanceSats) } ?: "— BTC", 27f, ink, true))
+            bitcoin.addView(label("BALANCE", 11f, muted, true).apply { setPadding(0, dp(7), 0, dp(4)) })
+            val balanceRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            balanceRow.addView(
+                label(current?.let { formatBtc(it.balanceSats) } ?: "— tBTC", 24f, ink, true),
+                LinearLayout.LayoutParams(0, -2, 1f)
+            )
+            balanceRow.addView(testnetBadge())
+            bitcoin.addView(balanceRow)
             bitcoin.addView(label(
                 current?.let { it.balanceSats.toString() + " sats · block " + it.blockHeight } ?: "Waiting for wallet state",
                 11f, muted
             ).apply { setPadding(0, dp(4), 0, dp(10)) })
-            bitcoin.addView(label("RECEIVE ADDRESS", 10f, muted, true).apply { setPadding(0, dp(4), 0, dp(5)) })
+            val addressHeading = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(4), 0, dp(5))
+            }
+            addressHeading.addView(label("RECEIVE ADDRESS", 11f, muted, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addressHeading.addView(testnetBadge())
+            bitcoin.addView(addressHeading)
             val addressCard = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 background = rounded(0xFFF8FAFC.toInt(), 12, border)
@@ -153,7 +188,14 @@ class WalletActivity : UiKitActivity() {
             actions.addView(spaceHorizontal(8))
             actions.addView(secondaryButton("New address") { generateAddress() })
             bitcoin.addView(actions)
-            bitcoin.addView(label(syncText, 11f, muted).apply { setPadding(0, dp(9), 0, 0) })
+            val syncLabel = lastSyncedAt?.let { timestamp ->
+                syncText + " · Updated " + java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(timestamp))
+            } ?: syncText
+            bitcoin.addView(label(syncLabel, 11f, muted).apply { setPadding(0, dp(9), 0, 0) })
+            bitcoin.addView(label("Use a fresh receive address for each payment to reduce address reuse.", 11f, muted).apply {
+                setPadding(0, dp(6), 0, 0)
+                setLineSpacing(dp(2).toFloat(), 1f)
+            })
         }
         bitcoin.addView(label(
             "Send/spend is not enabled. It will only be added after fee estimation, transaction preview, explicit confirmation and a reviewed signing flow.",
@@ -162,27 +204,19 @@ class WalletActivity : UiKitActivity() {
         body.addView(bitcoin)
         body.addView(space(12))
 
-        val lama = card()
-        lama.addView(label("LAMA COIN", 10f, muted, true))
-        lama.addView(label("Lama Coin wallet", 19f, ink, true).apply { setPadding(0, dp(5), 0, 0) })
-        lama.addView(label(
-            "Not connected yet. The supplied Lama Coin project is currently a desktop Rust node/wallet, not an Android wallet library. The mobile adapter must be built and tested before creating addresses or handling funds.",
-            12f, muted
-        ).apply { setPadding(0, dp(7), 0, dp(9)); setLineSpacing(dp(3).toFloat(), 1f) })
-        lama.addView(label(
-            "Lama Coin is the intended product name. The wallet adapter, ticker and network identifiers will be connected only after their mobile integration and chain identity are finalized; no placeholder address is generated.",
-            11f, muted
-        ).apply { setLineSpacing(dp(2).toFloat(), 1f) })
+        val lama = compactUnavailableRow(
+            title = "Lama Coin",
+            subtitle = "Not available yet · Android wallet adapter is not connected",
+            description = "The supplied Lama Coin project is currently a desktop Rust node/wallet, not an Android wallet library. The mobile adapter must be built and tested before creating addresses or handling funds. No placeholder address is generated."
+        )
         body.addView(lama)
         body.addView(space(12))
 
-        val nfts = card()
-        nfts.addView(label("NFT COLLECTION", 10f, muted, true))
-        nfts.addView(label("NFTs belong here in Morta Mesh", 17f, ink, true).apply { setPadding(0, dp(5), 0, 0) })
-        nfts.addView(label(
-            "Minting, ownership, transfers and marketplace settlement remain unavailable until Lama Coin implements and validates native asset outputs and NFT transaction rules.",
-            12f, muted
-        ).apply { setPadding(0, dp(7), 0, 0); setLineSpacing(dp(3).toFloat(), 1f) })
+        val nfts = compactUnavailableRow(
+            title = "NFT collection",
+            subtitle = "Not available yet · native asset rules are not finalized",
+            description = "Minting, ownership, transfers and marketplace settlement remain unavailable until Lama Coin implements and validates native asset outputs and NFT transaction rules."
+        )
         body.addView(nfts)
         body.addView(space(12))
 
@@ -211,6 +245,7 @@ class WalletActivity : UiKitActivity() {
             engine.openExistingWallet()
         }) { loaded ->
             walletReady = true
+            backupPending = engine.isBackupPending()
             snapshot = loaded
             receiveAddress = loaded.receiveAddress
             syncText = "Wallet ready · Bitcoin Testnet4"
@@ -222,6 +257,7 @@ class WalletActivity : UiKitActivity() {
             engine.createNewTestnetWallet()
         }) { phrase ->
             walletReady = true
+            backupPending = engine.isBackupPending()
             snapshot = engine.snapshot()
             receiveAddress = snapshot?.receiveAddress.orEmpty()
             syncText = "Wallet created · back up the recovery phrase"
@@ -257,6 +293,7 @@ class WalletActivity : UiKitActivity() {
                     words.text = ""
                     try {
                         engine.acknowledgeBackup()
+                        backupPending = false
                         syncText = "Recovery phrase saved in your offline backup"
                     } catch (_: Exception) {
                         errorText = "Could not record the backup confirmation. The phrase will be shown again next time."
@@ -296,6 +333,7 @@ class WalletActivity : UiKitActivity() {
                     engine.snapshot()
                 }) { restored ->
                     walletReady = true
+                    backupPending = false
                     snapshot = restored
                     receiveAddress = restored.receiveAddress
                     syncText = "Wallet restored · Testnet4"
@@ -349,6 +387,7 @@ class WalletActivity : UiKitActivity() {
                     runOnUiThread {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         snapshot = next
+                        lastSyncedAt = System.currentTimeMillis()
                         receiveAddress = next.receiveAddress
                         syncText = "Synced through block " + next.blockHeight
                         render()
@@ -415,10 +454,40 @@ class WalletActivity : UiKitActivity() {
         }
     }
 
+    private fun testnetBadge(): TextView = label("TESTNET · NO REAL VALUE", 11f, blue, true).apply {
+        background = rounded(blueLight, 99)
+        setPadding(dp(8), dp(5), dp(8), dp(5))
+        gravity = Gravity.CENTER
+    }
+
+    private fun compactUnavailableRow(title: String, subtitle: String, description: String): LinearLayout =
+        card().apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "$title, not available yet. Double tap for details."
+            setOnClickListener {
+                AlertDialog.Builder(this@WalletActivity)
+                    .setTitle(title)
+                    .setMessage(description)
+                    .setPositiveButton("Got it", null)
+                    .show()
+            }
+            val copy = LinearLayout(this@WalletActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label(title, 15f, ink, true))
+                addView(label(subtitle, 11f, muted).apply { setPadding(0, dp(4), 0, 0) })
+            }
+            addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(label("Details  ›", 12f, blue, true))
+        }
+
     private fun formatBtc(sats: ULong): String {
         val whole = sats / 100_000_000uL
         val fraction = sats % 100_000_000uL
-        return String.format(Locale.US, "%d.%08d BTC", whole.toLong(), fraction.toLong())
+        return String.format(Locale.US, "%d.%08d tBTC", whole.toLong(), fraction.toLong())
     }
 
     private fun space(height: Int) = android.view.View(this).apply {
