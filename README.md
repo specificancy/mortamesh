@@ -1,6 +1,6 @@
 # Morta Mesh for Android
 
-Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.7.0 / core protocol v2 with a separate anonymous submission protocol**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, and an encrypted Private Vault. It has no sign-up, no central messaging server, and no wallet/crypto UI.
+Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.8.0 / core protocol v2 with anonymous submissions and an isolated wallet foundation**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, an encrypted Private Vault, and a separate wallet entry. The first wallet milestone is Bitcoin Testnet4-only; Lama Coin and native NFTs are clearly marked as not yet connected. It has no sign-up and no central messaging server for its mesh messaging.
 
 The Android manifest includes `INTERNET` permission for the app's **local Wi-Fi Direct TCP sockets**. This allows directly connected phones to exchange data over their local link; it is not used to connect to a central messaging server.
 
@@ -98,3 +98,14 @@ This is an implementation-stage prototype, **not a verified production release**
 Media policy is based on type, never file size: text uses an available authenticated route, photos use Bluetooth LE, and videos use Wi-Fi Direct only. Media is direct-link-only and remains encrypted in the Private Vault queue until an end-to-end receipt from the saved logical recipient confirms that the recipient's encrypted file and vault index were committed. A receipt from a different pinned peer cannot mark the transfer delivered. Prior unsent media is recovered only when chat history uniquely identifies its intended conversation. Vault media decryption and image decoding run off the main thread; photo previews are downsampled to limit memory pressure.
 
 Known limitations: background radio behavior varies by OEM/API; media (photos over BLE, videos over Wi-Fi Direct) is sent only over a direct link to the recipient and is never relayed, so media waits in the queue until the recipient is directly connected on the required link type; large photos can be very slow over Bluetooth LE; media storage is capped by per-item, per-sender, total-vault, and free-space limits; there is no ratcheting/forward secrecy; TOFU still requires fingerprint verification; route hop claims remain manipulable by malicious neighbors; routing metadata remains visible; protocol behavior, storage recovery, and three-device routing still need field testing.
+
+
+## Wallet foundation (0.8.0 · experimental)
+
+Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to Bitcoin Testnet4: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the Testnet4 balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
+
+The Lama Coin section is intentionally a separate, not-yet-connected foundation. The uploaded Lama Coin source is a desktop Rust node/wallet rather than an Android library; it also needs its genesis, network identity and Android integration contract resolved before the app can generate Lama addresses or manage funds. Native NFTs and marketplace settlement are likewise pending native asset transaction support in the chain.
+
+Wallet activity is independent of Mortalive authentication and does not share wallet addresses, keys, balances, holdings or transaction history with Mortalive or anonymous group submissions. Any future NFT display or membership proof must be an explicit, separate opt-in.
+
+See [WALLET_ARCHITECTURE.md](WALLET_ARCHITECTURE.md) for the implemented scope, explicit limitations and follow-up engineering requirements. This is an experimental Testnet4 foundation, not a production wallet.
