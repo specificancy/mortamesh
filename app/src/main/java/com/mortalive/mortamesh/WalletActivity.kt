@@ -46,6 +46,8 @@ class WalletActivity : UiKitActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         engine = BitcoinTestnetWalletEngine(this)
         walletExists = engine.hasWallet()
+        lastSyncedAt = getSharedPreferences("wallet_public_metadata_v1", MODE_PRIVATE)
+            .getLong("btc_testnet4_last_synced_at", 0L).takeIf { it > 0L }
         backupPending = engine.isBackupPending()
         render()
         if (walletExists) {
@@ -388,6 +390,8 @@ class WalletActivity : UiKitActivity() {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         snapshot = next
                         lastSyncedAt = System.currentTimeMillis()
+                        getSharedPreferences("wallet_public_metadata_v1", MODE_PRIVATE).edit()
+                            .putLong("btc_testnet4_last_synced_at", lastSyncedAt!!).apply()
                         receiveAddress = next.receiveAddress
                         syncText = "Synced through block " + next.blockHeight
                         render()
