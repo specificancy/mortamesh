@@ -131,6 +131,8 @@ class MainActivity : UiKitActivity() {
     private var isScanning = false
     private var scanAvailable = true
     private var lastPeerRenderAt = 0L
+    private var scrollableScreen: ScrollView? = null
+    private var scrollableScreenId: Screen? = null
     private var statusText = "Not connected"
     private var chatColumn: LinearLayout? = null
     private var chatScroll: ScrollView? = null
@@ -478,6 +480,7 @@ class MainActivity : UiKitActivity() {
         worldComposer = null
         worldCharCounter = null
         worldLinkStatus = null
+        val previousScrollY = if (scrollableScreenId == currentScreen) scrollableScreen?.scrollY ?: 0 else 0
         content.removeAllViews()
         val view = when (currentScreen) {
             Screen.HOME -> buildHome()
@@ -490,12 +493,17 @@ class MainActivity : UiKitActivity() {
             Screen.ANONYMOUS_POST -> buildAnonymousPost()
         }
         content.addView(view, FrameLayout.LayoutParams(-1, -1))
+        scrollableScreen = view as? ScrollView
+        scrollableScreenId = currentScreen
+        scrollableScreen?.let { restored ->
+            restored.post { restored.scrollTo(0, previousScrollY) }
+        }
         refreshNav()
     }
 
     private fun buildHome(): View {
         val p = page()
-        addBrandHeader(p, if (meshRunning || wifiDiscovering) "Visible" else "Go online") { ensureBluetoothPermissionsAndStart() }
+        addBrandHeader(p, if (meshRunning || wifiDiscovering) "Visible" else "Start nearby discovery") { ensureBluetoothPermissionsAndStart() }
 
         val hero = card().apply {
             background = rounded(0xFFEDF4FF.toInt(), 24)
@@ -522,7 +530,7 @@ class MainActivity : UiKitActivity() {
         }
         statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(28), dp(28)))
         val statusColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        statusColumn.addView(label(if (online) "Nearby discovery is active" else "Your device is offline", 14f, ink, true))
+        statusColumn.addView(label(if (online) "Nearby discovery is active" else "Nearby discovery is off", 14f, ink, true))
         statusColumn.addView(label("Photos · Bluetooth\nVideos · Wi-Fi Direct", 12f, muted).apply { setPadding(0, dp(4), 0, 0) })
         statusRow.addView(statusColumn, LinearLayout.LayoutParams(0, -2, 1f))
         status.addView(statusRow)
@@ -669,7 +677,11 @@ class MainActivity : UiKitActivity() {
                 box.addView(AvatarView(this, nameFor(id)), LinearLayout.LayoutParams(dp(46), dp(46)))
                 val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, 0, 0) }
                 col.addView(label(nameFor(id), 14f, ink, true))
-                col.addView(label(last.text.take(44), 12f, muted).apply { setPadding(0, dp(5), 0, 0) })
+                col.addView(label(last.text, 12f, muted).apply {
+                    setPadding(0, dp(5), 0, 0)
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
                 box.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
                 box.addView(label("›", 26f, muted))
                 p.addView(box); p.addView(vSpace(9))
@@ -1246,6 +1258,13 @@ class MainActivity : UiKitActivity() {
         return scrollPage(p)
     }
 
+    @Suppress("DEPRECATION")
+    private fun appVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+    } catch (_: Exception) {
+        "unknown"
+    }
+
     private fun buildSettings(): View {
         val p = page()
         addBrandHeader(p)
@@ -1320,7 +1339,7 @@ class MainActivity : UiKitActivity() {
         p.addView(privacy)
         p.addView(vSpace(12))
         val info = card()
-        info.addView(label("Morta Mesh · Prototype 0.7.0", 14f, ink, true))
+        info.addView(label("Morta Mesh · v${appVersionName()}", 14f, ink, true))
         info.addView(label("Offline-first Android messaging with Wi-Fi Direct and Bluetooth LE.", 12f, muted).apply { setPadding(0, dp(7), 0, 0) })
         p.addView(info)
         return scrollPage(p)
@@ -1338,10 +1357,13 @@ class MainActivity : UiKitActivity() {
         }
         top.addView(label("‹", 32f, blue, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(3), 0, dp(10), 0)
+            contentDescription = "Back to conversations"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
+            isFocusable = true
             setOnClickListener { activeChatId = null; currentScreen = Screen.CHATS; render() }
-        }, LinearLayout.LayoutParams(dp(38), dp(44)))
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         top.addView(AvatarView(this, peerId?.let { nameFor(it) } ?: "M"), LinearLayout.LayoutParams(dp(40), dp(40)))
         val headerColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
         headerColumn.addView(label(peerId?.let { nameFor(it) } ?: "Conversation", 15f, ink, true))
@@ -1355,8 +1377,17 @@ class MainActivity : UiKitActivity() {
             else if (isMeshChat) "Waiting for a mesh route" else if (isWifiChat) "Wi-Fi Direct · connecting" else "Bluetooth LE · nearby"
         headerColumn.addView(label(connectionLabel, 11f, if (chatConnected) green else muted).apply { setPadding(0, dp(4), 0, 0) })
         top.addView(headerColumn, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(label("⋯", 24f, muted).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)); isClickable = true; setOnClickListener { showPeerInfo() } })
-        wrapper.addView(top, LinearLayout.LayoutParams(-1, dp(66)))
+        top.addView(label("⋯", 24f, muted).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Peer identity and safety details"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showPeerInfo() }
+        })
+        top.minimumHeight = dp(66)
+        wrapper.addView(top, LinearLayout.LayoutParams(-1, -2))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -1402,8 +1433,8 @@ class MainActivity : UiKitActivity() {
             }
         }
         currentComposer = composer
-        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }, LinearLayout.LayoutParams(dp(34), dp(40)).apply { rightMargin = dp(4) })
-        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }, LinearLayout.LayoutParams(dp(34), dp(40)).apply { rightMargin = dp(5) })
+        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(4) })
+        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(5) })
         composerShell.addView(composer, LinearLayout.LayoutParams(0, -2, 1f))
         val send = TextView(this).apply {
             text = "↑"
@@ -1411,10 +1442,14 @@ class MainActivity : UiKitActivity() {
             setTextColor(white)
             gravity = Gravity.CENTER
             background = rounded(blue, 16)
+            contentDescription = "Send message"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
+            isFocusable = true
             setOnClickListener { sendComposerMessage() }
         }
-        composerShell.addView(send, LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(5) })
+        composerShell.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(5) })
         wrapper.addView(composerShell, LinearLayout.LayoutParams(-1, -2))
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
         return wrapper
@@ -1423,6 +1458,8 @@ class MainActivity : UiKitActivity() {
     private fun mediaActionButton(symbol: String, description: String, action: () -> Unit): TextView = label(symbol, 21f, blue, true).apply {
         gravity = Gravity.CENTER
         contentDescription = description
+        minimumWidth = dp(48)
+        minimumHeight = dp(48)
         background = rounded(blueLight, 13)
         isClickable = true
         isFocusable = true
@@ -2355,13 +2392,20 @@ class MainActivity : UiKitActivity() {
                     }
                 }
             }
+            item.contentDescription = "$title tab"
+            item.isSelected = selected
+            item.isActivated = selected
             item.addView(TextView(this).apply {
                 text = icon
                 textSize = 21f
                 gravity = Gravity.CENTER
+                contentDescription = title
                 setTextColor(if (selected) blue else 0xFF8A94A6.toInt())
             }, LinearLayout.LayoutParams(-1, dp(28)))
-            item.addView(label(title, 10f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply { gravity = Gravity.CENTER })
+            item.addView(label(title, 11f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply {
+                gravity = Gravity.CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
             navBar.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
         }
     }
