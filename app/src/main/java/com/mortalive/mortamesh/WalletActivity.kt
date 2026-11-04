@@ -20,14 +20,9 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /** Independent Testnet4 wallet surface with no Mortalive account or group-session dependency. */
-class WalletActivity : Activity() {
-    private val blue = 0xFF1877F2.toInt()
-    private val paleBlue = 0xFFEAF2FF.toInt()
-    private val ink = 0xFF172033.toInt()
-    private val muted = 0xFF667085.toInt()
-    private val background = 0xFFF6F8FC.toInt()
-    private val white = 0xFFFFFFFF.toInt()
-    private val border = 0xFFE6EAF1.toInt()
+class WalletActivity : UiKitActivity() {
+
+    override fun areUiActionsEnabled(): Boolean = !busy
 
     private val executor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "MortaMesh-Wallet-UI").apply { isDaemon = true }
@@ -425,52 +420,6 @@ class WalletActivity : Activity() {
         val fraction = sats % 100_000_000uL
         return String.format(Locale.US, "%d.%08d BTC", whole.toLong(), fraction.toLong())
     }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun rounded(color: Int, radiusDp: Int, strokeColor: Int? = null): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dp(radiusDp).toFloat()
-            if (strokeColor != null) setStroke(dp(1), strokeColor)
-        }
-
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(16))
-        background = rounded(white, 20, border)
-        elevation = dp(1).toFloat()
-    }
-
-    private fun label(value: String, size: Float, color: Int, bold: Boolean = false): TextView =
-        TextView(this).apply {
-            text = value
-            textSize = size
-            setTextColor(color)
-            if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            gravity = Gravity.CENTER_VERTICAL
-            includeFontPadding = false
-        }
-
-    private fun primaryButton(value: String, action: () -> Unit): TextView =
-        label(value, 13f, white, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(13), dp(10), dp(13), dp(10))
-            background = rounded(blue, 11)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { if (!busy) action() }
-        }
-
-    private fun secondaryButton(value: String, action: () -> Unit): TextView =
-        label(value, 12f, blue, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(11), dp(9), dp(11), dp(9))
-            background = rounded(paleBlue, 11)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { if (!busy) action() }
-        }
 
     private fun space(height: Int) = android.view.View(this).apply {
         layoutParams = LinearLayout.LayoutParams(1, dp(height))
