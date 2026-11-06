@@ -54,6 +54,7 @@ import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
+import android.net.wifi.WpsInfo
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -567,7 +568,7 @@ class MainActivity : UiKitActivity() {
         val statusColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         statusColumn.addView(label(if (online) "Nearby discovery is active" else "Nearby discovery is off", 14f, ink, true))
         statusColumn.addView(label(
-            if (online) "Nearby discovery is active" else "No nearby search is running",
+            if (online) "Scanning only · tap a discovered device to start a connection" else "No nearby search is running",
             12f, muted
         ).apply { setPadding(0, dp(4), 0, 0) })
         statusRow.addView(statusColumn, LinearLayout.LayoutParams(0, -2, 1f))
@@ -2393,7 +2394,10 @@ class MainActivity : UiKitActivity() {
             addView(AvatarView(this@MainActivity, displayName), LinearLayout.LayoutParams(dp(46), dp(46)))
             val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(4), 0) }
             col.addView(label(displayName, 14f, ink, true))
-            col.addView(label(if (connected) "Connected · Wi-Fi Direct" else "FAST · Wi-Fi Direct", 12f, if (connected) green else blue).apply { setPadding(0, dp(5), 0, 0) })
+            col.addView(label(
+                if (connected) "Connected · Wi-Fi Direct" else "Discovered · not connected",
+                12f, if (connected) green else muted
+            ).apply { setPadding(0, dp(5), 0, 0) })
             addView(col, LinearLayout.LayoutParams(0, -2, 1f))
             addView(label(if (showSignal) "Fast  ›" else "›", if (showSignal) 12f else 24f, blue, true))
         }
@@ -2646,6 +2650,8 @@ class MainActivity : UiKitActivity() {
             } else if (groupedFingerprint != null) {
                 append("\n\nSHA-256 fingerprint (compare all groups with your contact through another trusted channel before marking verified):\n")
                 append(groupedFingerprint)
+            } else if (peer.startsWith(WIFI_PREFIX) && nodeId == null) {
+                append("\n\nNo authenticated Wi-Fi Direct link exists yet. Discovery only finds the phone; it does not exchange identity fingerprints. Once the Wi-Fi Direct socket connects, keep both apps open while the encrypted identity handshake completes.")
             } else {
                 append("\n\nIdentity fingerprint is not available yet. Keep both apps open while identities exchange.")
             }
@@ -3532,6 +3538,17 @@ class MainActivity : UiKitActivity() {
         }
     }
 
+    private fun wifiP2pConnectFailureMessage(reason: Int): String = when (reason) {
+        WifiP2pManager.BUSY ->
+            "Android Wi-Fi Direct is busy. Close any other Wi-Fi Direct session, wait a few seconds, then retry."
+        WifiP2pManager.P2P_UNSUPPORTED ->
+            "This phone does not support Wi-Fi Direct. Bluetooth remains available."
+        WifiP2pManager.ERROR ->
+            "Android's Wi-Fi Direct service returned an internal error before the connection started. Keep both apps open, make sure Wi-Fi is on on both phones, and retry from one phone."
+        else ->
+            "Android could not start Wi-Fi Direct (reason $reason). Keep both apps open and retry; Bluetooth remains available."
+    }
+
     @SuppressLint("MissingPermission")
     private fun connectWifiToPeer(address: String, chatId: String) {
         val manager = wifiP2pManager
@@ -3552,19 +3569,39 @@ class MainActivity : UiKitActivity() {
         }
         val normalizedAddress = normalizeWifiAddress(address)
         if (normalizedAddress.isBlank()) return
+        if (normalizedAddress == "02:00:00:00:00:00") {
+            Toast.makeText(
+                this,
+                "Android did not expose a usable Wi-Fi Direct peer address. Re-scan both phones and retry; Bluetooth remains available.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         wifiConnectingChatId = chatId
         wifiConnectAddresses[chatId] = normalizedAddress
-        val config = WifiP2pConfig().apply { deviceAddress = normalizedAddress }
+        val config = WifiP2pConfig().apply {
+            deviceAddress = normalizedAddress
+            // Required by Android's documented peer-to-peer connect flow.
+            wps.setup = WpsInfo.PBC
+        }
         try {
             manager.connect(channel, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     runOnUiThread { Toast.makeText(this@MainActivity, "Connecting over Wi-Fi Direct…", Toast.LENGTH_SHORT).show() }
                 }
                 override fun onFailure(reason: Int) {
-                    wifiConnectingChatId = null
+                    if (wifiConnectingChatId == chatId) wifiConnectingChatId = null
                     runOnUiThread {
-                        Toast.makeText(this@MainActivity, "Wi-Fi Direct connection failed ($reason). Try Bluetooth instead.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            this@MainActivity,
+                            wifiP2pConnectFailureMessage(reason),
+                            Toast.LENGTH_LONG
+                        ).show()
                         refreshChatHeaderOrNav()
+                        // A failed connect request stops discovery; restart it so the peer list is fresh.
+                        mainHandler.postDelayed({
+                            if (uiVisible && !isFinishing && !isDestroyed) startWifiDiscoverySilently()
+                        }, 1800L)
                     }
                 }
             })
