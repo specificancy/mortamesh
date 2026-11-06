@@ -396,6 +396,7 @@ class MainActivity : UiKitActivity() {
         if (permissionsPermanentlyDenied && hasBluetoothRuntimePermissions() && hasWifiDirectRuntimePermission()) {
             permissionsPermanentlyDenied = false
             preferences.edit().putBoolean("nearby_permissions_permanently_denied", false).apply()
+            startAvailableTransports()
             if (currentScreen == Screen.HOME || currentScreen == Screen.NEARBY) render()
         }
         if (currentScreen == Screen.VAULT) render() else refreshNav()
@@ -2976,9 +2977,10 @@ class MainActivity : UiKitActivity() {
     /** Runs on resume and the mesh timer; work is gated by lifecycle, permission and radio state. */
     private fun wifiAutoTick() {
         if (!::privateVault.isInitialized || isFinishing || isDestroyed || !uiVisible) return
-        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        val locationReady = wifiLocationServicesEnabled()
         val now = System.currentTimeMillis()
-        if (!wifiDiscovering) startWifiDiscoverySilently()
+        if (locationReady && !wifiDiscovering) startWifiDiscoverySilently()
 
         val pending = pendingVideoTransfers()
         if (weCreatedWifiGroupAt != 0L) {
@@ -2999,6 +3001,7 @@ class MainActivity : UiKitActivity() {
             }
         }
 
+        if (!locationReady) return
         if (pending.isNotEmpty()) {
             offerWifiLinkForQueuedVideo(pending)
         } else if (weCreatedWifiGroupAt != 0L && activeMediaTransfers.isEmpty()) {
