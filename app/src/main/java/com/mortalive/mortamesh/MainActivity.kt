@@ -54,6 +54,8 @@ import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.net.wifi.WpsInfo
 import android.view.Gravity
 import android.view.View
@@ -83,6 +85,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.Charset
+import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -164,7 +167,18 @@ class MainActivity : UiKitActivity() {
     private var worldLinkStatus: TextView? = null
     private var worldPostFeedback: TextView? = null
 
-    private data class NearbyPeer(val device: BluetoothDevice, var name: String, var lastSeen: Long = System.currentTimeMillis())
+    private data class NearbyPeer(
+        val device: BluetoothDevice,
+        var name: String,
+        var nodeHint: String? = null,
+        var lastSeen: Long = System.currentTimeMillis()
+    )
+    private data class PendingWifiChatRequest(
+        val requestId: String,
+        val peerNodeId: String,
+        val peerName: String,
+        val expiresAt: Long
+    )
     private data class ChatMessage(
         val text: String,
         val mine: Boolean,
@@ -238,6 +252,20 @@ class MainActivity : UiKitActivity() {
     private var wifiServerSocket: ServerSocket? = null
     private var wifiServerThread: Thread? = null
     private val wifiPeers = linkedMapOf<String, WifiP2pDevice>()
+    // Wi-Fi Direct exposes a transport address, not the Morta identity. DNS-SD binds the
+    // transient P2P address to the stable node ID advertised by the same app.
+    private val wifiPeerNodeIds = linkedMapOf<String, String>()
+    private val wifiPeerNodeHints = linkedMapOf<String, String>()
+    private val wifiPeerDisplayNames = linkedMapOf<String, String>()
+    private var wifiLocalServiceRegistered = false
+    private var wifiServiceDiscoveryStarting = false
+    private val wifiIncomingChatRequests = linkedMapOf<String, PendingWifiChatRequest>()
+    private val wifiOutgoingChatRequests = linkedMapOf<String, PendingWifiChatRequest>()
+    private val wifiAcceptedChatRequests = linkedMapOf<String, String>()
+    private var lastWifiChatRequestToastAt = 0L
+    private var pendingWifiChatAutoOpenNodeId: String? = null
+    private var wifiChatGroupRequestId: String? = null
+    private var wifiChatGroupPeerNodeId: String? = null
     private val wifiSockets = linkedMapOf<String, Socket>()
     private val wifiWriters = linkedMapOf<String, BufferedWriter>()
     private val pendingWifiMessages = linkedMapOf<String, ArrayDeque<String>>()
@@ -304,6 +332,8 @@ class MainActivity : UiKitActivity() {
 
     private val wifiChannelListener: WifiP2pManager.ChannelListener = WifiP2pManager.ChannelListener {
         wifiP2pChannel = wifiP2pManager?.initialize(applicationContext, mainLooper, wifiChannelListener)
+        wifiLocalServiceRegistered = false
+        wifiServiceDiscoveryStarting = false
         runOnUiThread { Toast.makeText(this, "Wi-Fi Direct was reset. Scan again to reconnect.", Toast.LENGTH_LONG).show() }
     }
 
@@ -620,6 +650,7 @@ class MainActivity : UiKitActivity() {
         p.addView(vSpace(6))
         p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         p.addView(vSpace(16))
+        addWifiChatRequestCards(p)
         if (wifiPeers.isEmpty()) {
             p.addView(label("WI-FI DIRECT · HIGHER SPEED", 10f, blue, true).apply { letterSpacing = .08f })
             p.addView(vSpace(7))
@@ -666,6 +697,7 @@ class MainActivity : UiKitActivity() {
         addBrandHeader(p)
         addSectionTitle(p, "Conversations", "Private messages and the public mesh timeline.")
         p.addView(vSpace(14))
+        addWifiChatRequestCards(p)
         val worldEntry = card().apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -2388,27 +2420,45 @@ class MainActivity : UiKitActivity() {
     private fun wifiPeerRow(device: WifiP2pDevice, showSignal: Boolean): View {
         val address = normalizeWifiAddress(device.deviceAddress)
         val chatId = wifiChatId(address)
-        val displayName = device.deviceName?.takeIf { it.isNotBlank() } ?: "Wi-Fi Direct device"
+        val displayName = wifiPeerDisplayNames[address]
+            ?: device.deviceName?.takeIf { it.isNotBlank() }
+            ?: "Wi-Fi Direct device"
+        val nodeId = wifiPeerNodeIds[address]
+        val nodeChatId = nodeId?.let { wifiNodeChatId(it) }
+        val connected = nodeChatId?.let { wifiWriters.containsKey(it) } == true || wifiWriters.containsKey(chatId)
+        val pending = nodeId?.let { wifiOutgoingChatRequests[it] } != null
         wifiConnectAddresses[chatId] = address
         peerNames.putIfAbsent(chatId, displayName)
-        val connected = wifiWriters.containsKey(chatId)
         return card().apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
-            contentDescription = "$displayName, ${if (connected) "connected over Wi-Fi Direct" else "nearby over Wi-Fi Direct"}. Double tap to chat."
+            contentDescription = "$displayName, ${if (connected) "connected over Wi-Fi Direct" else if (pending) "Wi-Fi chat request sent" else "nearby over Wi-Fi Direct"}. Double tap to request a chat."
             setOnClickListener {
                 peerNames[chatId] = displayName
                 persistPeerNames()
-                openChat(chatId)
+                when {
+                    connected && nodeChatId != null -> openChat(nodeChatId)
+                    nodeId != null -> requestWifiChatConnection(address)
+                    else -> Toast.makeText(
+                        this@MainActivity,
+                        "Waiting for this phone's Morta Mesh identity. Make sure both phones have the current app and scan again.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
             addView(AvatarView(this@MainActivity, displayName), LinearLayout.LayoutParams(dp(46), dp(46)))
             val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(4), 0) }
             col.addView(label(displayName, 14f, ink, true))
             col.addView(label(
-                if (connected) "Connected · Wi-Fi Direct" else "Discovered · not connected",
+                when {
+                    connected -> "Connected · Wi-Fi Direct"
+                    pending -> "Request sent · waiting for acceptance"
+                    nodeId == null -> "Discovered · identifying Morta Mesh peer…"
+                    else -> "Tap to request a Wi-Fi chat"
+                },
                 12f, if (connected) green else muted
             ).apply { setPadding(0, dp(5), 0, 0) })
             addView(col, LinearLayout.LayoutParams(0, -2, 1f))
@@ -2993,12 +3043,7 @@ class MainActivity : UiKitActivity() {
         val now = System.currentTimeMillis()
         if (now - lastWifiAutoDiscoveryAt < 10_000L) return
         lastWifiAutoDiscoveryAt = now
-        try {
-            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() { wifiDiscovering = true }
-                override fun onFailure(reason: Int) { wifiDiscovering = false }
-            })
-        } catch (_: Exception) { }
+        startWifiIdentityServiceDiscovery()
     }
 
     private fun pendingVideoTransfers(): List<PrivateVault.Item> = try {
@@ -3205,25 +3250,7 @@ class MainActivity : UiKitActivity() {
         }
         try {
             if (forceRescan) wifiDiscovering = false
-            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    wifiDiscovering = true
-                    requestWifiPeers()
-                    runOnUiThread { renderIfBrowseScreen() }
-                }
-                override fun onFailure(reason: Int) {
-                    wifiDiscovering = false
-                    runOnUiThread {
-                        val explanation = when (reason) {
-                            WifiP2pManager.BUSY -> "Wi-Fi Direct is busy. Try scanning again in a moment."
-                            WifiP2pManager.P2P_UNSUPPORTED -> "This device does not support Wi-Fi Direct. Bluetooth remains available."
-                            else -> "Wi-Fi Direct discovery failed ($reason). Bluetooth remains available."
-                        }
-                        Toast.makeText(this@MainActivity, explanation, Toast.LENGTH_LONG).show()
-                        renderIfBrowseScreen()
-                    }
-                }
-            })
+            startWifiIdentityServiceDiscovery()
             return true
         } catch (e: SecurityException) {
             Toast.makeText(this, "Nearby Wi-Fi permission is required for Wi-Fi Direct.", Toast.LENGTH_LONG).show()
@@ -3231,6 +3258,164 @@ class MainActivity : UiKitActivity() {
         } catch (_: Exception) {
             Toast.makeText(this, "Wi-Fi Direct is unavailable. Bluetooth remains available.", Toast.LENGTH_LONG).show()
             return false
+        }
+    }
+
+    private fun ByteArray.toHexString(): String =
+        joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xFF) }
+
+    private fun localNodeHintBytes(): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(localNodeId.toByteArray(Charsets.UTF_8)).copyOfRange(0, 6)
+
+    private fun localNodeHint(): String = localNodeHintBytes().toHexString()
+
+    private fun isValidNodeId(value: String): Boolean =
+        runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiIdentityServiceDiscovery() {
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
+        if (wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiSocketClientConnecting ||
+            wifiGroupFormed || wifiSockets.isNotEmpty() || weCreatedWifiGroupAt != 0L || wifiServiceDiscoveryStarting) return
+        wifiServiceDiscoveryStarting = true
+        try {
+            manager.setDnsSdResponseListeners(channel, wifiDnsSdServiceListener, wifiDnsSdTxtListener)
+            if (wifiLocalServiceRegistered) {
+                startWifiIdentityServiceRequest(manager, channel)
+            } else {
+                val record = linkedMapOf(
+                    "node" to localNodeId,
+                    "hint" to localNodeHint(),
+                    "name" to nickname.filter { it.code in 32..126 }.take(32).ifBlank { "Morta user" },
+                    "version" to "2"
+                )
+                val service = WifiP2pDnsSdServiceInfo.newInstance("_morta", "_presence._tcp", record)
+                manager.addLocalService(channel, service, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        wifiLocalServiceRegistered = true
+                        startWifiIdentityServiceRequest(manager, channel)
+                    }
+                    override fun onFailure(reason: Int) {
+                        wifiServiceDiscoveryStarting = false
+                        startWifiPeerDiscoveryFallback(manager, channel)
+                    }
+                })
+            }
+        } catch (_: SecurityException) {
+            wifiServiceDiscoveryStarting = false
+            Toast.makeText(this, "Nearby Wi-Fi permission is required for Wi-Fi Direct discovery.", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            wifiServiceDiscoveryStarting = false
+            startWifiPeerDiscoveryFallback(manager, channel)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiIdentityServiceRequest(
+        manager: WifiP2pManager,
+        channel: WifiP2pManager.Channel
+    ) {
+        try {
+            manager.clearServiceRequests(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { addWifiIdentityServiceRequest(manager, channel) }
+                override fun onFailure(reason: Int) { addWifiIdentityServiceRequest(manager, channel) }
+            })
+        } catch (_: Exception) {
+            wifiServiceDiscoveryStarting = false
+            startWifiPeerDiscoveryFallback(manager, channel)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun addWifiIdentityServiceRequest(
+        manager: WifiP2pManager,
+        channel: WifiP2pManager.Channel
+    ) {
+        try {
+            val request = WifiP2pDnsSdServiceRequest.newInstance()
+            manager.addServiceRequest(channel, request, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    try {
+                        manager.discoverServices(channel, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {
+                                wifiServiceDiscoveryStarting = false
+                                wifiDiscovering = true
+                                requestWifiPeers()
+                                renderIfBrowseScreen()
+                            }
+                            override fun onFailure(reason: Int) {
+                                wifiServiceDiscoveryStarting = false
+                                wifiDiscovering = false
+                                startWifiPeerDiscoveryFallback(manager, channel)
+                            }
+                        })
+                    } catch (_: Exception) {
+                        wifiServiceDiscoveryStarting = false
+                        startWifiPeerDiscoveryFallback(manager, channel)
+                    }
+                }
+                override fun onFailure(reason: Int) {
+                    wifiServiceDiscoveryStarting = false
+                    startWifiPeerDiscoveryFallback(manager, channel)
+                }
+            })
+        } catch (_: Exception) {
+            wifiServiceDiscoveryStarting = false
+            startWifiPeerDiscoveryFallback(manager, channel)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiPeerDiscoveryFallback(
+        manager: WifiP2pManager,
+        channel: WifiP2pManager.Channel
+    ) {
+        try {
+            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    wifiDiscovering = true
+                    requestWifiPeers()
+                    renderIfBrowseScreen()
+                }
+                override fun onFailure(reason: Int) {
+                    wifiDiscovering = false
+                    renderIfBrowseScreen()
+                }
+            })
+        } catch (_: Exception) {
+            wifiDiscovering = false
+        }
+    }
+
+    private val wifiDnsSdTxtListener = WifiP2pManager.DnsSdTxtRecordListener { _, record, device ->
+        val address = normalizeWifiAddress(device.deviceAddress)
+        val nodeId = record["node"]?.trim().orEmpty()
+        val nodeHint = record["hint"]?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        val displayName = record["name"]?.trim()?.take(32).orEmpty()
+        if (address.isBlank() || !isValidNodeId(nodeId) || !Regex("[0-9a-f]{12}").matches(nodeHint)) return@DnsSdTxtRecordListener
+        runOnUiThread {
+            wifiPeers[address] = device
+            wifiPeerNodeIds[address] = nodeId
+            wifiPeerNodeHints[address] = nodeHint
+            if (displayName.isNotBlank()) wifiPeerDisplayNames[address] = displayName
+            val chatId = wifiChatId(address)
+            wifiConnectAddresses[chatId] = address
+            if (displayName.isNotBlank()) peerNames[chatId] = displayName
+            renderIfBrowseScreen()
+        }
+    }
+
+    private val wifiDnsSdServiceListener = WifiP2pManager.DnsSdServiceResponseListener { instanceName, _, device ->
+        val address = normalizeWifiAddress(device.deviceAddress)
+        if (address.isBlank()) return@DnsSdServiceResponseListener
+        runOnUiThread {
+            wifiPeers[address] = device
+            if (wifiPeerDisplayNames[address].isNullOrBlank()) {
+                wifiPeerDisplayNames[address] = instanceName.removePrefix("_").take(32).ifBlank { "Morta Mesh user" }
+            }
+            renderIfBrowseScreen()
         }
     }
 
@@ -3740,8 +3925,15 @@ class MainActivity : UiKitActivity() {
             .setTimeout(0)
             .build()
         val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(parcelUuid).build()
-        val shortName = nickname.filter { it.code in 32..126 }.take(12).ifBlank { "Morta" }.toByteArray(Charsets.UTF_8)
-        val scanResponse = AdvertiseData.Builder().addServiceData(parcelUuid, shortName).build()
+        val shortName = nickname.filter { it.code in 32..126 }.take(6).ifBlank { "Morta" }.toByteArray(Charsets.UTF_8)
+        // Version + 48-bit stable node hint + short name fits the legacy BLE scan-response budget.
+        val servicePayload = ByteArray(13).apply {
+            this[0] = 2
+            val hint = localNodeHintBytes()
+            System.arraycopy(hint, 0, this, 1, 6)
+            System.arraycopy(shortName, 0, this, 7, minOf(6, shortName.size))
+        }
+        val scanResponse = AdvertiseData.Builder().addServiceData(parcelUuid, servicePayload).build()
         try {
             adv.startAdvertising(settings, data, scanResponse, advertiseCallback)
         } catch (e: Exception) {
@@ -3813,14 +4005,24 @@ class MainActivity : UiKitActivity() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
             val address = try { device.address } catch (_: Exception) { return }
-            val rawName = try { result.scanRecord?.getServiceData(parcelUuid)?.toString(Charsets.UTF_8)?.trim()?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+            val servicePayload = try { result.scanRecord?.getServiceData(parcelUuid) } catch (_: Exception) { null }
+            val nodeHint = servicePayload?.takeIf { it.size >= 7 && it[0].toInt() == 2 }
+                ?.copyOfRange(1, 7)?.toHexString()
+            val rawName = servicePayload?.takeIf { it.size > 7 && it[0].toInt() == 2 }
+                ?.copyOfRange(7, servicePayload.size)?.toString(Charsets.UTF_8)?.trim()?.takeIf { it.isNotBlank() }
+                ?: servicePayload?.takeIf { it.isNotEmpty() && it[0].toInt() != 2 }
+                    ?.toString(Charsets.UTF_8)?.trim()?.takeIf { it.isNotBlank() }
             val fallbackName = try { device.name?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
-            val seenName = rawName ?: fallbackName ?: "Nearby user ${address.takeLast(2)}"
+            val seenName = rawName ?: fallbackName ?: "Nearby Morta user ${address.takeLast(2)}"
             runOnUiThread {
                 val now = System.currentTimeMillis()
                 val peer = nearbyPeers[address]
                 val changed = peer == null || peer.name != seenName
-                if (peer == null) nearbyPeers[address] = NearbyPeer(device, seenName) else { peer.name = seenName; peer.lastSeen = now }
+                if (peer == null) nearbyPeers[address] = NearbyPeer(device, seenName, nodeHint) else {
+                    peer.name = seenName
+                    if (nodeHint != null) peer.nodeHint = nodeHint
+                    peer.lastSeen = now
+                }
                 if (changed) {
                     peerNames[address] = seenName
                     persistPeerNames()
