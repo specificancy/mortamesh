@@ -1866,6 +1866,7 @@ class MainActivity : UiKitActivity() {
                         Toast.makeText(this, "Media remains queued for ${item.peerName}: ${failure.message ?: "connection interrupted"}. It will retry when the recipient is reachable.", Toast.LENGTH_LONG).show()
                     }
                     if (currentScreen == Screen.VAULT) render()
+                    wifiAutoTick()
                 }
             }
         }.apply { name = "MortaMesh-MediaSend"; isDaemon = true; start() }
@@ -2906,6 +2907,13 @@ class MainActivity : UiKitActivity() {
     private fun isWifiRadioOn(): Boolean =
         (applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)?.isWifiEnabled == true
 
+    /** Android 9–12 may require Location services to be enabled for Wi-Fi Direct discovery. */
+    private fun wifiLocationServicesEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT !in 28..32) return true
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        return locationManager?.isLocationEnabled != false
+    }
+
     /** First launch: request Bluetooth and Nearby Wi-Fi permissions, then start available transports. */
     private fun autoStartTransportsOnce() {
         if (autoStartAttempted) return
@@ -2933,6 +2941,14 @@ class MainActivity : UiKitActivity() {
     private fun prepareWifiForVideo() {
         if (!hasWifiDirectRuntimePermission()) { ensureBluetoothPermissionsAndStart(); return }
         if (!isWifiRadioOn()) { promptEnableWifi(); return }
+        if (!wifiLocationServicesEnabled()) {
+            Toast.makeText(
+                this,
+                "Enable Location services for Wi-Fi Direct discovery on this Android version. Morta Mesh does not collect your GPS location; Bluetooth remains available.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         startWifiDiscoverySilently()
         mainHandler.postDelayed({ wifiAutoTick() }, 1500)
     }
@@ -2941,7 +2957,7 @@ class MainActivity : UiKitActivity() {
     private fun startWifiDiscoverySilently() {
         val manager = wifiP2pManager ?: return
         val channel = wifiP2pChannel ?: return
-        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
         val now = System.currentTimeMillis()
         if (now - lastWifiAutoDiscoveryAt < 10_000L) return
         lastWifiAutoDiscoveryAt = now
@@ -2960,17 +2976,32 @@ class MainActivity : UiKitActivity() {
     /** Runs on resume and the mesh timer; work is gated by lifecycle, permission and radio state. */
     private fun wifiAutoTick() {
         if (!::privateVault.isInitialized || isFinishing || isDestroyed || !uiVisible) return
-        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
         val now = System.currentTimeMillis()
         if (!wifiDiscovering) startWifiDiscoverySilently()
-        if (!wifiGroupFormed && weCreatedWifiGroupAt != 0L && now - weCreatedWifiGroupAt > 10_000L) {
-            weCreatedWifiGroupAt = 0L
-            activeOfferFrame = null
-        }
+
         val pending = pendingVideoTransfers()
+        if (weCreatedWifiGroupAt != 0L) {
+            // A group that never forms is stale. Remove it instead of leaving Wi-Fi Direct busy.
+            if (!wifiGroupFormed && now - weCreatedWifiGroupAt > 30_000L) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+                return
+            }
+            // Once this recipient has no queued video left, release the group so the next
+            // recipient in the encrypted vault queue can receive its own short-lived group.
+            val activeRecipientStillQueued = activeOfferRecipient?.let { recipient ->
+                pending.any { it.recipientId == recipient }
+            } == true
+            if (activeMediaTransfers.isEmpty() && !activeRecipientStillQueued) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+            }
+        }
+
         if (pending.isNotEmpty()) {
             offerWifiLinkForQueuedVideo(pending)
-        } else if (weCreatedWifiGroupAt != 0L && activeMediaTransfers.isEmpty() && now - weCreatedWifiGroupAt > 120_000L) {
+        } else if (weCreatedWifiGroupAt != 0L && activeMediaTransfers.isEmpty()) {
             releaseAutoWifiGroup()
         }
     }
@@ -2989,14 +3020,29 @@ class MainActivity : UiKitActivity() {
     private fun offerWifiLinkForQueuedVideo(pending: List<PrivateVault.Item>) {
         if (Build.VERSION.SDK_INT < 29) return
         val now = System.currentTimeMillis()
-        if (weCreatedWifiGroupAt != 0L && wifiSockets.isEmpty()) {
-            // Repeat the same offer while the group is valid and the recipient has not joined.
-            val frame = activeOfferFrame
+        if (weCreatedWifiGroupAt != 0L) {
             val recipient = activeOfferRecipient
-            if (frame != null && recipient != null && now < activeOfferExpiry && now - lastWifiOfferAt >= 20_000L) {
-                val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+            val recipientStillQueued = recipient != null && pending.any { it.recipientId == recipient }
+
+            // Expired offers are removed and retried with fresh credentials; do not strand the queue.
+            if (now >= activeOfferExpiry && activeMediaTransfers.isEmpty()) {
+                releaseAutoWifiGroup()
                 lastWifiOfferAt = now
-                Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+                return
+            }
+            // The active recipient may have completed while other recipients are still queued.
+            if (!recipientStillQueued && activeMediaTransfers.isEmpty()) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+                return
+            }
+            if (wifiSockets.isEmpty()) {
+                val frame = activeOfferFrame
+                if (frame != null && recipient != null && now < activeOfferExpiry && now - lastWifiOfferAt >= 20_000L) {
+                    val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+                    lastWifiOfferAt = now
+                    Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+                }
             }
             return
         }
@@ -3049,8 +3095,18 @@ class MainActivity : UiKitActivity() {
         if (now > expiry || expiry - now > 180_000L) return
         if (!Regex("DIRECT-[A-Za-z0-9]{2}-[A-Za-z0-9]{1,32}").matches(ssid)) return
         if (passphrase.length !in 8..63 || !passphrase.all { it.isLetterOrDigit() }) return
-        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) {
-            runOnUiThread { if (!hasWifiDirectRuntimePermission()) ensureBluetoothPermissionsAndStart() else promptEnableWifi() }
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) {
+            runOnUiThread {
+                when {
+                    !hasWifiDirectRuntimePermission() -> ensureBluetoothPermissionsAndStart()
+                    !isWifiRadioOn() -> promptEnableWifi()
+                    else -> Toast.makeText(
+                        this,
+                        "Enable Location services for Wi-Fi Direct on this Android version. Morta Mesh does not collect your GPS location.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
             return
         }
         val manager = wifiP2pManager ?: return
