@@ -2447,10 +2447,18 @@ class MainActivity : UiKitActivity() {
             }
             val mediaName = if (isVideo) "Video" else "Photo"
             detail.addView(label("$mediaName · ${formatBytes(message.mediaSize)}", 13f, if (message.mine) white else ink, true))
+            val deliveredTransport = when (message.requiredTransport) {
+                "Bluetooth LE" -> "Bluetooth"
+                else -> message.requiredTransport ?: "nearby link"
+            }
             val stateText = when (message.deliveryState) {
-                "QUEUED" -> "Queued · needs ${message.requiredTransport ?: "nearby link"}"
+                "QUEUED" -> if (isVideo && Build.VERSION.SDK_INT >= 29) {
+                    "Connecting over Wi-Fi Direct automatically…"
+                } else {
+                    "Queued · needs ${message.requiredTransport ?: "nearby link"}"
+                }
                 "SENDING" -> "Sending · ${message.requiredTransport ?: "nearby link"}"
-                "DELIVERED" -> "Delivered"
+                "DELIVERED" -> "Delivered over $deliveredTransport"
                 "RECEIVED" -> "Received · saved in Private Vault"
                 else -> "Saved in Private Vault"
             }
