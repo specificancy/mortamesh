@@ -227,6 +227,10 @@ class MainActivity : UiKitActivity() {
     private var wifiDiscovering = false
     private var wifiLocalAddress: String = ""
     private var wifiConnectingChatId: String? = null
+    // A P2P request remains active until the authenticated Wi-Fi socket is ready or times out.
+    // Discovery must stay paused while this flag is true; Android stops discovery during negotiation.
+    private var wifiP2pConnectRequestPending = false
+    private var wifiConnectTimeoutRunnable: Runnable? = null
     private var wifiSocketClientConnecting = false
     private var wifiGroupFormed = false
     private var wifiServerSocket: ServerSocket? = null
@@ -423,6 +427,7 @@ class MainActivity : UiKitActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(meshGossipRunnable)
+        clearWifiConnectTimeout()
         anonymousSelectedFile?.delete()
         File(cacheDir, "anonymous-source").deleteRecursively()
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) { }
@@ -2973,6 +2978,8 @@ class MainActivity : UiKitActivity() {
         val manager = wifiP2pManager ?: return
         val channel = wifiP2pChannel ?: return
         if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
+        if (wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiSocketClientConnecting ||
+            wifiGroupFormed || wifiSockets.isNotEmpty() || weCreatedWifiGroupAt != 0L) return
         val now = System.currentTimeMillis()
         if (now - lastWifiAutoDiscoveryAt < 10_000L) return
         lastWifiAutoDiscoveryAt = now
@@ -2994,7 +3001,13 @@ class MainActivity : UiKitActivity() {
         if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
         val locationReady = wifiLocationServicesEnabled()
         val now = System.currentTimeMillis()
-        if (locationReady && !wifiDiscovering) startWifiDiscoverySilently()
+        // Wi-Fi P2P discovery and connection negotiation must not fight each other. Android
+        // stops discovery when a connection begins; do not restart it until the socket is ready
+        // or the bounded connection attempt has been cleaned up.
+        val p2pSessionBusy = wifiP2pConnectRequestPending || wifiConnectingChatId != null ||
+            wifiSocketClientConnecting || wifiGroupFormed || wifiSockets.isNotEmpty() ||
+            weCreatedWifiGroupAt != 0L
+        if (locationReady && !p2pSessionBusy && !wifiDiscovering) startWifiDiscoverySilently()
 
         val pending = pendingVideoTransfers()
         if (weCreatedWifiGroupAt != 0L) {
@@ -3102,7 +3115,8 @@ class MainActivity : UiKitActivity() {
     @SuppressLint("MissingPermission")
     private fun handleWifiLinkOffer(peerId: String, parts: List<String>, fromNodeId: String?) {
         if (Build.VERSION.SDK_INT < 29 || fromNodeId == null || parts.size < 6) return
-        if (!uiVisible || wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        if (!uiVisible || wifiP2pConnectRequestPending || wifiGroupFormed ||
+            wifiSockets.isNotEmpty() || wifiConnectingChatId != null || wifiSocketClientConnecting) return
         val now = System.currentTimeMillis()
         if (now - lastWifiJoinAt < 15_000L) return
         val ssid = decodeWire(parts[2])
@@ -3133,14 +3147,22 @@ class MainActivity : UiKitActivity() {
             Toast.makeText(this, "Joining ${nameFor(peerId)} over Wi-Fi Direct to receive a video…", Toast.LENGTH_SHORT).show()
             try {
                 val config = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+                wifiP2pConnectRequestPending = true
+                scheduleWifiP2pConnectTimeout(null)
                 manager.connect(channel, config, object : WifiP2pManager.ActionListener {
                     override fun onSuccess() { }
                     override fun onFailure(reason: Int) {
+                        wifiP2pConnectRequestPending = false
+                        clearWifiConnectTimeout()
                         // Older/vendor builds may reject credential-based joining; use the address invitation.
                         if (fallbackAddress.isNotBlank()) connectWifiToPeer(fallbackAddress, wifiChatId(fallbackAddress))
+                        else if (uiVisible) mainHandler.postDelayed({ startWifiDiscoverySilently() }, 1800L)
                     }
                 })
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+                wifiP2pConnectRequestPending = false
+                clearWifiConnectTimeout()
+            }
         }
     }
 
@@ -3149,6 +3171,17 @@ class MainActivity : UiKitActivity() {
         val manager = wifiP2pManager ?: return false
         val channel = wifiP2pChannel ?: return false
         if (!hasWifiDirectRuntimePermission()) return false
+        if (wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiSocketClientConnecting ||
+            wifiGroupFormed || wifiSockets.isNotEmpty() || weCreatedWifiGroupAt != 0L) {
+            Toast.makeText(this, "A Wi-Fi Direct session is already connecting or active. Keep both apps open and try again after it finishes.", Toast.LENGTH_LONG).show()
+            return false
+        }
+        // A scan button can be tapped repeatedly. Reuse the active discovery instead of
+        // issuing overlapping discoverPeers() requests to the framework.
+        if (wifiDiscovering) {
+            requestWifiPeers()
+            return true
+        }
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         if (wifi?.isWifiEnabled != true) {
             Toast.makeText(this, "Turn on Wi-Fi to use the faster Wi-Fi Direct connection. Bluetooth remains available.", Toast.LENGTH_LONG).show()
@@ -3227,7 +3260,10 @@ class MainActivity : UiKitActivity() {
                     // Android stops discovery after about two minutes; restart it quietly while the app is open.
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_DISCOVERY_STATE, WifiP2pManager.WIFI_P2P_DISCOVERY_STOPPED)
                     wifiDiscovering = state == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED
-                    if (!wifiDiscovering) mainHandler.postDelayed({ wifiAutoTick() }, 1500)
+                    if (!wifiDiscovering && !wifiP2pConnectRequestPending && wifiConnectingChatId == null &&
+                        !wifiSocketClientConnecting && !wifiGroupFormed && wifiSockets.isEmpty()) {
+                        mainHandler.postDelayed({ wifiAutoTick() }, 1500)
+                    }
                 }
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestWifiPeers()
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
@@ -3254,6 +3290,8 @@ class MainActivity : UiKitActivity() {
             wifiSocketClientConnecting = false
             if (wifiGroupFormed) {
                 wifiGroupFormed = false
+                wifiP2pConnectRequestPending = false
+                clearWifiConnectTimeout()
                 wifiConnectingChatId = null
                 // The group-owned TCP service is only valid while this P2P group exists.
                 try { wifiServerSocket?.close() } catch (_: Exception) { }
@@ -3441,6 +3479,8 @@ class MainActivity : UiKitActivity() {
                                 try {
                                     wifiSockets[peerId] = socket
                                     wifiWriters[peerId] = socketWriter
+                                    wifiP2pConnectRequestPending = false
+                                    clearWifiConnectTimeout()
                                     wifiSocketClientConnecting = false
                                     if (wifiConnectingChatId == peerId) wifiConnectingChatId = null
                                     peerNames[peerId] = remoteName
@@ -3538,6 +3578,41 @@ class MainActivity : UiKitActivity() {
         }
     }
 
+    private fun clearWifiConnectTimeout() {
+        wifiConnectTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        wifiConnectTimeoutRunnable = null
+    }
+
+    private fun scheduleWifiP2pConnectTimeout(chatId: String?) {
+        clearWifiConnectTimeout()
+        val timeout = Runnable {
+            if (!wifiP2pConnectRequestPending || wifiSockets.isNotEmpty()) return@Runnable
+            if (chatId != null && wifiConnectingChatId != chatId) return@Runnable
+
+            wifiP2pConnectRequestPending = false
+            wifiSocketClientConnecting = false
+            if (chatId == null || wifiConnectingChatId == chatId) wifiConnectingChatId = null
+            val manager = wifiP2pManager
+            val channel = wifiP2pChannel
+            if (manager != null && channel != null && hasWifiDirectRuntimePermission()) {
+                try { manager.cancelConnect(channel, null) } catch (_: Exception) { }
+                try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+            }
+            wifiGroupFormed = false
+            Toast.makeText(
+                this,
+                "Wi-Fi Direct did not finish connecting. The request was cleared; retry from one phone, or continue over Bluetooth.",
+                Toast.LENGTH_LONG
+            ).show()
+            refreshChatHeaderOrNav()
+            if (uiVisible && !isFinishing && !isDestroyed) {
+                mainHandler.postDelayed({ startWifiDiscoverySilently() }, 1800L)
+            }
+        }
+        wifiConnectTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, 40_000L)
+    }
+
     private fun wifiP2pConnectFailureMessage(reason: Int): String = when (reason) {
         WifiP2pManager.BUSY ->
             "Android Wi-Fi Direct is busy. Close any other Wi-Fi Direct session, wait a few seconds, then retry."
@@ -3561,7 +3636,11 @@ class MainActivity : UiKitActivity() {
             ensureBluetoothPermissionsAndStart()
             return
         }
-        if (wifiConnectingChatId == chatId || wifiSocketClientConnecting || wifiSockets.containsKey(chatId)) return
+        if (wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiSocketClientConnecting ||
+            wifiGroupFormed || wifiSockets.isNotEmpty()) {
+            Toast.makeText(this, "Another Wi-Fi Direct connection is already in progress. Wait for it to finish before starting a second one.", Toast.LENGTH_LONG).show()
+            return
+        }
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         if (wifi?.isWifiEnabled != true) {
             Toast.makeText(this, "Turn on Wi-Fi, then reconnect. Bluetooth remains available.", Toast.LENGTH_LONG).show()
@@ -3578,6 +3657,8 @@ class MainActivity : UiKitActivity() {
             return
         }
         wifiConnectingChatId = chatId
+        wifiP2pConnectRequestPending = true
+        scheduleWifiP2pConnectTimeout(chatId)
         wifiConnectAddresses[chatId] = normalizedAddress
         val config = WifiP2pConfig().apply {
             deviceAddress = normalizedAddress
@@ -3591,6 +3672,8 @@ class MainActivity : UiKitActivity() {
                 }
                 override fun onFailure(reason: Int) {
                     if (wifiConnectingChatId == chatId) wifiConnectingChatId = null
+                    wifiP2pConnectRequestPending = false
+                    clearWifiConnectTimeout()
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
@@ -3606,8 +3689,14 @@ class MainActivity : UiKitActivity() {
                 }
             })
         } catch (_: SecurityException) {
+            wifiP2pConnectRequestPending = false
+            clearWifiConnectTimeout()
+            if (wifiConnectingChatId == chatId) wifiConnectingChatId = null
             Toast.makeText(this, "Nearby Wi-Fi permission is required.", Toast.LENGTH_LONG).show()
         } catch (_: Exception) {
+            wifiP2pConnectRequestPending = false
+            clearWifiConnectTimeout()
+            if (wifiConnectingChatId == chatId) wifiConnectingChatId = null
             Toast.makeText(this, "Could not start Wi-Fi Direct. Try Bluetooth instead.", Toast.LENGTH_LONG).show()
         }
     }
