@@ -609,7 +609,11 @@ class MainActivity : UiKitActivity() {
         addBrandHeader(p, "Scan again") { ensureBluetoothPermissionsAndStart(forceRescan = true) }
         addSectionTitle(p, "Nearby devices", if (isScanning || wifiDiscovering) "Searching over both nearby transports…" else "Choose the faster Wi-Fi Direct link or Bluetooth LE")
         addPermissionsNeededCard(p)
-        p.addView(vSpace(14))
+        p.addView(label(
+            "A nearby phone may appear in both sections. Each entry is a separate connection path to the same phone, not a second person.",
+            12f, muted
+        ).apply { setPadding(0, dp(2), 0, dp(8)) })
+        p.addView(vSpace(6))
         p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         p.addView(vSpace(16))
         if (wifiPeers.isEmpty()) {
@@ -3076,7 +3080,8 @@ class MainActivity : UiKitActivity() {
             }
             return
         }
-        if (wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        if (wifiP2pConnectRequestPending || wifiGroupFormed || wifiSockets.isNotEmpty() ||
+            wifiConnectingChatId != null || wifiSocketClientConnecting) return
         if (now - lastWifiOfferAt < 25_000L) return
         val manager = wifiP2pManager ?: return
         val channel = wifiP2pChannel ?: return
