@@ -303,6 +303,7 @@ class MainActivity : UiKitActivity() {
     private enum class Screen { HOME, NEARBY, CHATS, VAULT, SETTINGS, CHAT, WORLD_CHAT, ANONYMOUS_POST }
     private companion object {
         const val WIFI_PREFIX = "wifi:"
+        const val WIFI_NODE_PREFIX = "wifi:node:"
         const val MESH_PREFIX = "mesh:"
         const val MESH_ID_PREFIX = "@MORTAMESH/2/ID|"
         const val MESH_PACKET_PREFIX = "@MORTAMESH/2/PACKET|"
@@ -636,6 +637,41 @@ class MainActivity : UiKitActivity() {
             p.addView(secondaryButton("See all nearby devices") { currentScreen = Screen.NEARBY; render() })
         }
         return scrollPage(p)
+    }
+
+    private fun pruneWifiChatRequests() {
+        val now = System.currentTimeMillis()
+        wifiIncomingChatRequests.entries.removeAll { it.value.expiresAt <= now }
+        wifiOutgoingChatRequests.entries.removeAll { it.value.expiresAt <= now }
+    }
+
+    private fun addWifiChatRequestCards(parent: LinearLayout) {
+        pruneWifiChatRequests()
+        if (wifiIncomingChatRequests.isEmpty()) return
+        parent.addView(vSpace(12))
+        addSectionTitle(parent, "Wi-Fi Direct requests", "Requests stay here quietly; no blocking popup is shown.")
+        parent.addView(vSpace(8))
+        wifiIncomingChatRequests.values.sortedBy { it.expiresAt }.take(4).forEach { request ->
+            val requestCard = card()
+            requestCard.addView(label(request.peerName, 14f, ink, true))
+            requestCard.addView(label(
+                "Wants to start an encrypted Wi-Fi Direct chat",
+                12f, muted
+            ).apply { setPadding(0, dp(4), 0, dp(10)) })
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            actions.addView(primaryButton("Accept") {
+                acceptWifiChatRequest(request.requestId)
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) })
+            actions.addView(secondaryButton("Decline") {
+                declineWifiChatRequest(request.requestId)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            requestCard.addView(actions)
+            parent.addView(requestCard)
+            parent.addView(vSpace(8))
+        }
     }
 
     private fun buildNearby(): View {
@@ -2614,7 +2650,14 @@ class MainActivity : UiKitActivity() {
             Toast.makeText(this, "Message is too long. Keep it under 3 KB.", Toast.LENGTH_SHORT).show()
             return
         }
-        if (!sendSecurePayload(peerId, text, asChatText = true)) {
+        val useWifiChatTransport = peerId.startsWith(WIFI_NODE_PREFIX) && wifiWriters.containsKey(peerId)
+        if (!sendSecurePayload(
+                peerId,
+                text,
+                forcedFirstHop = if (useWifiChatTransport) peerId else null,
+                asChatText = true,
+                strictFirstHop = useWifiChatTransport
+            )) {
             val message = if (chatSendRateLimited) {
                 "Sending paused to protect mesh delivery limits. Your message is still in the composer; retry after the short rate-limit window."
             } else {
@@ -2635,7 +2678,10 @@ class MainActivity : UiKitActivity() {
         }
         persistPeerNames()
         render()
-        if (peerId.startsWith(MESH_PREFIX)) {
+        if (peerId.startsWith(WIFI_NODE_PREFIX)) {
+            val nodeId = peerId.removePrefix(WIFI_NODE_PREFIX)
+            if (!hasPeerTransport(peerId)) requestWifiChatConnectionForNode(nodeId)
+        } else if (peerId.startsWith(MESH_PREFIX)) {
             val route = meshRoutes[peerId.removePrefix(MESH_PREFIX)]
             if (route == null) Toast.makeText(this, "No active mesh route to this device yet.", Toast.LENGTH_LONG).show()
             else if (!hasPeerTransport(route.nextHop)) Toast.makeText(this, "The relay link is offline. Scan nearby devices again.", Toast.LENGTH_LONG).show()
@@ -2737,6 +2783,10 @@ class MainActivity : UiKitActivity() {
     }
 
     private fun nameFor(peerId: String): String {
+        if (peerId.startsWith(WIFI_NODE_PREFIX)) {
+            val node = peerId.removePrefix(WIFI_NODE_PREFIX)
+            return meshSecurity.displayNameFor(node) ?: peerNames[peerId] ?: "Morta Mesh user"
+        }
         if (peerId.startsWith(MESH_PREFIX)) {
             val node = peerId.removePrefix(MESH_PREFIX)
             return meshRoutes[node]?.name ?: meshSecurity.displayNameFor(node) ?: peerNames[peerId] ?: "Morta Mesh user"
@@ -2969,6 +3019,375 @@ class MainActivity : UiKitActivity() {
 
     private fun normalizeWifiAddress(address: String): String = address.trim().uppercase(Locale.ROOT)
     private fun wifiChatId(address: String): String = WIFI_PREFIX + normalizeWifiAddress(address)
+    private fun wifiNodeChatId(nodeId: String): String = WIFI_NODE_PREFIX + nodeId
+
+    private fun directBluetoothHop(nodeId: String, preferredHop: String? = null): String? {
+        val preferred = preferredHop?.takeIf {
+            !it.startsWith(WIFI_PREFIX) && hasPeerTransport(it) && nodeForTransport(it) == nodeId
+        }
+        if (preferred != null) return preferred
+        val routeHop = meshRoutes[nodeId]
+            ?.takeIf { it.hops == 1 && !it.nextHop.startsWith(WIFI_PREFIX) && hasPeerTransport(it.nextHop) }
+            ?.nextHop
+        if (routeHop != null && nodeForTransport(routeHop) == nodeId) return routeHop
+        return synchronized(physicalNodeByTransport) {
+            physicalNodeByTransport.entries.firstOrNull { (transport, node) ->
+                node == nodeId && !transport.startsWith(WIFI_PREFIX) && hasPeerTransport(transport)
+            }?.key
+        }
+    }
+
+    private fun sendWifiChatControl(
+        nodeId: String,
+        payload: JSONObject,
+        preferredBleHop: String? = null
+    ): Boolean {
+        val hop = directBluetoothHop(nodeId, preferredBleHop) ?: return false
+        return sendSecurePayload(
+            MESH_PREFIX + nodeId,
+            payload.toString(),
+            forcedFirstHop = hop,
+            strictFirstHop = true
+        )
+    }
+
+    private fun requestWifiChatConnectionForNode(nodeId: String) {
+        val address = wifiPeerNodeIds.entries.firstOrNull { it.value == nodeId }?.key
+        if (address == null) {
+            Toast.makeText(this, "Re-scan Wi-Fi Direct to find this phone before requesting a new session.", Toast.LENGTH_LONG).show()
+            return
+        }
+        requestWifiChatConnection(address)
+    }
+
+    private fun requestWifiChatConnection(address: String) {
+        val normalizedAddress = normalizeWifiAddress(address)
+        val nodeId = wifiPeerNodeIds[normalizedAddress]
+        if (nodeId.isNullOrBlank() || !isValidNodeId(nodeId)) {
+            Toast.makeText(this, "This Wi-Fi peer has not published a Morta Mesh identity yet. Scan both transports again.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (isContactKeyChanged(MESH_PREFIX + nodeId)) {
+            Toast.makeText(this, "Wi-Fi chat blocked because this contact's identity key changed.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val wifiId = wifiNodeChatId(nodeId)
+        if (wifiWriters.containsKey(wifiId)) {
+            openChat(wifiId)
+            return
+        }
+        val existing = wifiOutgoingChatRequests[nodeId]
+        if (existing != null && existing.expiresAt > System.currentTimeMillis()) {
+            Toast.makeText(this, "Wi-Fi chat request is already waiting for " + existing.peerName + ".", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) {
+            if (!hasWifiDirectRuntimePermission()) ensureBluetoothPermissionsAndStart() else promptEnableWifi()
+            return
+        }
+
+        val nodeHint = wifiPeerNodeHints[normalizedAddress]
+        val bluetoothAddress = nearbyPeers.entries.firstOrNull { (_, peer) ->
+            nodeHint != null && peer.nodeHint == nodeHint
+        }?.key
+        if (directBluetoothHop(nodeId) == null && bluetoothAddress == null) {
+            Toast.makeText(
+                this,
+                "Wi-Fi sees this phone, but its Bluetooth control link is not visible yet. Keep both apps open and scan both transports.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val request = PendingWifiChatRequest(
+            UUID.randomUUID().toString(),
+            nodeId,
+            wifiPeerDisplayNames[normalizedAddress] ?: nameFor(MESH_PREFIX + nodeId),
+            System.currentTimeMillis() + 60_000L
+        )
+        wifiOutgoingChatRequests[nodeId] = request
+        trySendWifiChatRequest(nodeId, request.requestId, bluetoothAddress, System.currentTimeMillis() + 15_000L)
+        renderIfBrowseScreen()
+    }
+
+    private fun trySendWifiChatRequest(
+        nodeId: String,
+        requestId: String,
+        bluetoothAddress: String?,
+        deadline: Long
+    ) {
+        val request = wifiOutgoingChatRequests[nodeId]
+        if (request == null || request.requestId != requestId) return
+        val hop = directBluetoothHop(nodeId)
+        if (hop != null) {
+            val payload = JSONObject()
+                .put("kind", "wifi_chat_request")
+                .put("requestId", requestId)
+                .put("expiresAt", request.expiresAt)
+            if (sendWifiChatControl(nodeId, payload, hop)) {
+                Toast.makeText(this, "Wi-Fi chat request sent to " + request.peerName + ".", Toast.LENGTH_SHORT).show()
+                renderIfBrowseScreen()
+                return
+            }
+        }
+        if (System.currentTimeMillis() >= deadline) {
+            wifiOutgoingChatRequests.remove(nodeId)
+            Toast.makeText(
+                this,
+                "Could not establish the encrypted Bluetooth control link. Connect over Bluetooth first, then retry Wi-Fi.",
+                Toast.LENGTH_LONG
+            ).show()
+            renderIfBrowseScreen()
+            return
+        }
+        if (bluetoothAddress != null && !hasPeerTransport(bluetoothAddress) &&
+            !clientGatts.containsKey(bluetoothAddress)) {
+            connectToPeer(bluetoothAddress)
+        }
+        mainHandler.postDelayed({
+            trySendWifiChatRequest(nodeId, requestId, bluetoothAddress, deadline)
+        }, 300L)
+    }
+
+    private fun handleIncomingWifiChatRequest(
+        chatId: String,
+        fromNodeId: String,
+        payload: JSONObject
+    ) {
+        // Connection requests are accepted only from an authenticated, direct BLE neighbor.
+        if (chatId.startsWith(WIFI_PREFIX) || chatId.startsWith(MESH_PREFIX) ||
+            nodeForTransport(chatId) != fromNodeId || !hasPeerTransport(chatId)) return
+        val requestId = payload.optString("requestId")
+        val expiresAt = payload.optLong("expiresAt", 0L)
+        val now = System.currentTimeMillis()
+        if (!isValidNodeId(fromNodeId) ||
+            runCatching { UUID.fromString(requestId).toString() == requestId }.getOrDefault(false).not() ||
+            expiresAt <= now || expiresAt - now > 90_000L) return
+
+        pruneWifiChatRequests()
+        if (wifiIncomingChatRequests.containsKey(requestId)) return
+        if (wifiIncomingChatRequests.size >= 4) {
+            val oldest = wifiIncomingChatRequests.values.minByOrNull { it.expiresAt }?.requestId
+            if (oldest != null) wifiIncomingChatRequests.remove(oldest)
+        }
+        val peerName = identityRecords[fromNodeId]?.optString("name")
+            ?.takeIf { it.isNotBlank() } ?: nameFor(chatId)
+        wifiIncomingChatRequests[requestId] = PendingWifiChatRequest(requestId, fromNodeId, peerName, expiresAt)
+        if (now - lastWifiChatRequestToastAt >= 6_000L) {
+            lastWifiChatRequestToastAt = now
+            Toast.makeText(this, "Wi-Fi chat request from " + peerName, Toast.LENGTH_SHORT).show()
+        }
+        if (currentScreen == Screen.NEARBY || currentScreen == Screen.CHATS) render() else refreshNav()
+    }
+
+    private fun acceptWifiChatRequest(requestId: String) {
+        val request = wifiIncomingChatRequests[requestId] ?: return
+        if (request.expiresAt <= System.currentTimeMillis()) {
+            wifiIncomingChatRequests.remove(requestId)
+            renderIfBrowseScreen()
+            return
+        }
+        if (!isWifiRadioOn() || !hasWifiDirectRuntimePermission()) {
+            if (!hasWifiDirectRuntimePermission()) ensureBluetoothPermissionsAndStart() else promptEnableWifi()
+            return
+        }
+        val payload = JSONObject().put("kind", "wifi_chat_accept").put("requestId", requestId)
+        if (!sendWifiChatControl(request.peerNodeId, payload)) {
+            Toast.makeText(this, "The Bluetooth control link is no longer ready. Re-scan and try again.", Toast.LENGTH_LONG).show()
+            return
+        }
+        wifiIncomingChatRequests.remove(requestId)
+        wifiAcceptedChatRequests[requestId] = request.peerNodeId
+        while (wifiAcceptedChatRequests.size > 8) {
+            wifiAcceptedChatRequests.remove(wifiAcceptedChatRequests.keys.first())
+        }
+        pendingWifiChatAutoOpenNodeId = request.peerNodeId
+        Toast.makeText(this, "Accepted. Setting up Wi-Fi Direct…", Toast.LENGTH_SHORT).show()
+        renderIfBrowseScreen()
+    }
+
+    private fun declineWifiChatRequest(requestId: String) {
+        val request = wifiIncomingChatRequests.remove(requestId) ?: return
+        sendWifiChatControl(
+            request.peerNodeId,
+            JSONObject().put("kind", "wifi_chat_decline").put("requestId", requestId)
+        )
+        renderIfBrowseScreen()
+    }
+
+    private fun handleIncomingWifiChatAcceptance(fromNodeId: String, payload: JSONObject) {
+        val request = wifiOutgoingChatRequests[fromNodeId] ?: return
+        if (request.requestId != payload.optString("requestId") ||
+            request.expiresAt <= System.currentTimeMillis()) return
+        wifiOutgoingChatRequests.remove(fromNodeId)
+        Toast.makeText(this, request.peerName + " accepted. Establishing Wi-Fi Direct…", Toast.LENGTH_SHORT).show()
+        startWifiChatGroup(request)
+    }
+
+    private fun handleIncomingWifiChatDecline(fromNodeId: String, payload: JSONObject) {
+        val request = wifiOutgoingChatRequests[fromNodeId] ?: return
+        if (request.requestId != payload.optString("requestId")) return
+        wifiOutgoingChatRequests.remove(fromNodeId)
+        Toast.makeText(this, request.peerName + " declined the Wi-Fi chat request.", Toast.LENGTH_SHORT).show()
+        renderIfBrowseScreen()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiChatGroup(request: PendingWifiChatRequest) {
+        if (Build.VERSION.SDK_INT < 29) {
+            sendWifiChatControl(
+                request.peerNodeId,
+                JSONObject().put("kind", "wifi_chat_failed")
+                    .put("requestId", request.requestId).put("reason", "requires_android_10")
+            )
+            Toast.makeText(this, "Credential-based Wi-Fi chat requires Android 10 or newer. Bluetooth remains available.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val manager = wifiP2pManager
+        val channel = wifiP2pChannel
+        if (manager == null || channel == null || !hasWifiDirectRuntimePermission() || !isWifiRadioOn()) {
+            Toast.makeText(this, "Wi-Fi Direct is not ready. Turn on Wi-Fi and retry.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiGroupFormed ||
+            wifiSocketClientConnecting || wifiSockets.isNotEmpty()) {
+            Toast.makeText(this, "Another Wi-Fi Direct session is already active. Finish it before connecting to another phone.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val chatId = wifiNodeChatId(request.peerNodeId)
+        val ssid = "DIRECT-mm-" + randomAlnum(4)
+        val passphrase = randomAlnum(16)
+        val config = try {
+            WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+        } catch (_: Exception) {
+            Toast.makeText(this, "This Android version cannot create a credential-based Wi-Fi Direct group.", Toast.LENGTH_LONG).show()
+            return
+        }
+        wifiConnectingChatId = chatId
+        wifiP2pConnectRequestPending = true
+        wifiChatGroupRequestId = request.requestId
+        wifiChatGroupPeerNodeId = request.peerNodeId
+        pendingWifiChatAutoOpenNodeId = request.peerNodeId
+        scheduleWifiP2pConnectTimeout(chatId)
+        try {
+            manager.createGroup(channel, config, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    val offer = JSONObject()
+                        .put("kind", "wifi_chat_offer")
+                        .put("requestId", request.requestId)
+                        .put("ssid", ssid)
+                        .put("passphrase", passphrase)
+                        .put("expiresAt", System.currentTimeMillis() + 120_000L)
+                    if (!sendWifiChatControl(request.peerNodeId, offer)) {
+                        failWifiChatSession(request.peerNodeId, request.requestId,
+                            "The secure Bluetooth link dropped before Wi-Fi credentials could be delivered.")
+                    }
+                }
+                override fun onFailure(reason: Int) {
+                    failWifiChatSession(request.peerNodeId, request.requestId, wifiP2pConnectFailureMessage(reason))
+                }
+            })
+        } catch (_: Exception) {
+            failWifiChatSession(request.peerNodeId, request.requestId, "Could not create the Wi-Fi Direct group.")
+        }
+    }
+
+    private fun handleIncomingWifiChatOffer(
+        chatId: String,
+        fromNodeId: String,
+        payload: JSONObject
+    ) {
+        val requestId = payload.optString("requestId")
+        if (wifiAcceptedChatRequests[requestId] != fromNodeId) return
+        val ssid = payload.optString("ssid")
+        val passphrase = payload.optString("passphrase")
+        val expiresAt = payload.optLong("expiresAt", 0L)
+        val now = System.currentTimeMillis()
+        if (expiresAt <= now || expiresAt - now > 180_000L ||
+            !Regex("DIRECT-[A-Za-z0-9]{2}-[A-Za-z0-9]{1,32}").matches(ssid) ||
+            passphrase.length !in 8..63 || !passphrase.all { it.isLetterOrDigit() }) return
+        if (!isWifiRadioOn() || !hasWifiDirectRuntimePermission()) {
+            sendWifiChatControl(
+                fromNodeId,
+                JSONObject().put("kind", "wifi_chat_failed").put("requestId", requestId).put("reason", "wifi_not_ready"),
+                preferredBleHop = chatId
+            )
+            return
+        }
+        if (Build.VERSION.SDK_INT < 29 || wifiP2pManager == null || wifiP2pChannel == null ||
+            wifiP2pConnectRequestPending || wifiConnectingChatId != null || wifiGroupFormed ||
+            wifiSocketClientConnecting || wifiSockets.isNotEmpty()) {
+            sendWifiChatControl(
+                fromNodeId,
+                JSONObject().put("kind", "wifi_chat_failed").put("requestId", requestId).put("reason", "p2p_busy"),
+                preferredBleHop = chatId
+            )
+            return
+        }
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        val peerChatId = wifiNodeChatId(fromNodeId)
+        val config = try {
+            WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+        } catch (_: Exception) {
+            failWifiChatSession(fromNodeId, requestId, "This Android version cannot join a credential-based Wi-Fi Direct group.", chatId)
+            return
+        }
+        wifiConnectingChatId = peerChatId
+        wifiP2pConnectRequestPending = true
+        wifiChatGroupRequestId = requestId
+        wifiChatGroupPeerNodeId = fromNodeId
+        pendingWifiChatAutoOpenNodeId = fromNodeId
+        scheduleWifiP2pConnectTimeout(peerChatId)
+        try {
+            manager.connect(channel, config, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Toast.makeText(this@MainActivity, "Joining the accepted Wi-Fi chat…", Toast.LENGTH_SHORT).show()
+                }
+                override fun onFailure(reason: Int) {
+                    failWifiChatSession(fromNodeId, requestId, wifiP2pConnectFailureMessage(reason), chatId)
+                }
+            })
+        } catch (_: Exception) {
+            failWifiChatSession(fromNodeId, requestId, "Could not start the Wi-Fi Direct join request.", chatId)
+        }
+    }
+
+    private fun handleIncomingWifiChatFailure(fromNodeId: String, payload: JSONObject) {
+        val request = wifiOutgoingChatRequests[fromNodeId]
+        val requestId = payload.optString("requestId")
+        if (request != null && request.requestId == requestId) {
+            wifiOutgoingChatRequests.remove(fromNodeId)
+            Toast.makeText(this, request.peerName + " could not start Wi-Fi Direct. Bluetooth is still available.", Toast.LENGTH_LONG).show()
+            renderIfBrowseScreen()
+        }
+    }
+
+    private fun failWifiChatSession(
+        peerNodeId: String,
+        requestId: String,
+        message: String,
+        preferredBleHop: String? = null
+    ) {
+        wifiP2pConnectRequestPending = false
+        clearWifiConnectTimeout()
+        wifiConnectingChatId = null
+        wifiChatGroupRequestId = null
+        wifiChatGroupPeerNodeId = null
+        pendingWifiChatAutoOpenNodeId = null
+        sendWifiChatControl(
+            peerNodeId,
+            JSONObject().put("kind", "wifi_chat_failed").put("requestId", requestId).put("reason", message.take(120)),
+            preferredBleHop
+        )
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        refreshChatHeaderOrNav()
+        if (uiVisible && !isFinishing && !isDestroyed) {
+            mainHandler.postDelayed({ startWifiDiscoverySilently() }, 1800L)
+        }
+    }
+
 
     // ---- Automatic Wi-Fi Direct (no taps) -------------------------------------------------------
     // A queued video creates a short-lived Wi-Fi Direct group with random credentials. The offer is
@@ -3621,6 +4040,10 @@ class MainActivity : UiKitActivity() {
                         if (previouslyBoundNode != null && previouslyBoundNode != nodeId) {
                             throw java.io.IOException("Wi-Fi transport identity changed unexpectedly")
                         }
+                        if (resolvedPeerId?.startsWith(WIFI_NODE_PREFIX) == true &&
+                            resolvedPeerId?.removePrefix(WIFI_NODE_PREFIX) != nodeId) {
+                            throw java.io.IOException("Wi-Fi peer did not match the accepted Morta Mesh identity")
+                        }
                         remoteNodeId = nodeId
                         remoteNonce = nonce
                         remoteIdentity = identity
@@ -3687,7 +4110,18 @@ class MainActivity : UiKitActivity() {
                                     flushPendingWifiMessages(peerId)
                                     onTransportReady(peerId)
                                     applyIdentityAdvertisement(peerId, MESH_ROUTE_TTL, UUID.randomUUID().toString(), 0, identity)
-                                    if (currentScreen == Screen.CHAT && activeChatId == peerId) render() else refreshNav()
+                                    if (pendingWifiChatAutoOpenNodeId == nodeId) {
+                                        pendingWifiChatAutoOpenNodeId = null
+                                        wifiChatGroupRequestId = null
+                                        wifiChatGroupPeerNodeId = null
+                                        activeChatId = peerId
+                                        currentScreen = Screen.CHAT
+                                        render()
+                                    } else if (currentScreen == Screen.CHAT && activeChatId == peerId) {
+                                        render()
+                                    } else {
+                                        refreshNav()
+                                    }
                                     renderIfBrowseScreen()
                                 } finally {
                                     ready.countDown()
@@ -3927,11 +4361,11 @@ class MainActivity : UiKitActivity() {
         val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(parcelUuid).build()
         val shortName = nickname.filter { it.code in 32..126 }.take(6).ifBlank { "Morta" }.toByteArray(Charsets.UTF_8)
         // Version + 48-bit stable node hint + short name fits the legacy BLE scan-response budget.
-        val servicePayload = ByteArray(13).apply {
+        val servicePayload = ByteArray(7 + shortName.size).apply {
             this[0] = 2
             val hint = localNodeHintBytes()
             System.arraycopy(hint, 0, this, 1, 6)
-            System.arraycopy(shortName, 0, this, 7, minOf(6, shortName.size))
+            System.arraycopy(shortName, 0, this, 7, shortName.size)
         }
         val scanResponse = AdvertiseData.Builder().addServiceData(parcelUuid, servicePayload).build()
         try {
@@ -4739,6 +5173,8 @@ class MainActivity : UiKitActivity() {
     }
 
     private fun chatIdForNode(nodeId: String, incomingTransport: String?): String {
+        val wifiId = wifiNodeChatId(nodeId)
+        if (wifiWriters.containsKey(wifiId)) return wifiId
         if (incomingTransport != null && nodeForTransport(incomingTransport) == nodeId) return incomingTransport
         val route = meshRoutes[nodeId]
         if (route != null && route.hops == 1 && hasPeerTransport(route.nextHop)) return route.nextHop
@@ -4747,6 +5183,9 @@ class MainActivity : UiKitActivity() {
 
     private fun resolveTargetNode(chatPeerId: String): String? {
         if (chatPeerId.startsWith(MESH_PREFIX)) return chatPeerId.removePrefix(MESH_PREFIX).takeIf { it.isNotBlank() }
+        if (chatPeerId.startsWith(WIFI_NODE_PREFIX)) {
+            return chatPeerId.removePrefix(WIFI_NODE_PREFIX).takeIf { isValidNodeId(it) }
+        }
         return nodeForTransport(chatPeerId)
             ?: if (chatPeerId.startsWith(WIFI_PREFIX)) meshRoutes.values.firstOrNull { it.nextHop == chatPeerId }?.nodeId else null
     }
@@ -4861,6 +5300,11 @@ class MainActivity : UiKitActivity() {
     private fun handleDecryptedChatPayload(chatId: String, fromNodeId: String, content: String) {
         val payload = try { JSONObject(content) } catch (_: Exception) { return }
         when (payload.optString("kind")) {
+            "wifi_chat_request" -> handleIncomingWifiChatRequest(chatId, fromNodeId, payload)
+            "wifi_chat_accept" -> handleIncomingWifiChatAcceptance(fromNodeId, payload)
+            "wifi_chat_decline" -> handleIncomingWifiChatDecline(fromNodeId, payload)
+            "wifi_chat_offer" -> handleIncomingWifiChatOffer(chatId, fromNodeId, payload)
+            "wifi_chat_failed" -> handleIncomingWifiChatFailure(fromNodeId, payload)
             "text" -> {
                 val text = payload.optString("text")
                 if (text.isNotEmpty()) {
