@@ -129,6 +129,8 @@ class MainActivity : UiKitActivity() {
     private var meshRunning = false
     private var gattServiceReady = false
     private var advertisingRequested = false
+    private var advertisingStartPending = false
+    private var isAdvertising = false
     private var isScanning = false
     private var scanAvailable = true
     private var lastPeerRenderAt = 0L
@@ -433,6 +435,8 @@ class MainActivity : UiKitActivity() {
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) { }
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) { }
         advertisingRequested = false
+        advertisingStartPending = false
+        isAdvertising = false
         gattServiceReady = false
         try { gattServer?.close() } catch (_: Exception) { }
         clientGatts.values.toList().forEach { try { it.disconnect(); it.close() } catch (_: Exception) { } }
@@ -2898,7 +2902,9 @@ class MainActivity : UiKitActivity() {
             }
             advertisingRequested = true
             startGattServer()
-            if (gattServiceReady) startAdvertising()
+            // A rescan restarts only the scanner. Restarting the advertisement can rotate
+            // the BLE address and make the same phone appear as a new nearby row.
+            if (gattServiceReady && !isAdvertising && !advertisingStartPending) startAdvertising()
             startScanning()
             meshRunning = true
             statusText = "Visible over Bluetooth LE"
@@ -3725,7 +3731,8 @@ class MainActivity : UiKitActivity() {
     @SuppressLint("MissingPermission")
     private fun startAdvertising() {
         val adv = advertiser ?: return
-        try { adv.stopAdvertising(advertiseCallback) } catch (_: Exception) { }
+        if (isAdvertising || advertisingStartPending) return
+        advertisingStartPending = true
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
@@ -3735,20 +3742,38 @@ class MainActivity : UiKitActivity() {
         val data = AdvertiseData.Builder().setIncludeDeviceName(false).addServiceUuid(parcelUuid).build()
         val shortName = nickname.filter { it.code in 32..126 }.take(12).ifBlank { "Morta" }.toByteArray(Charsets.UTF_8)
         val scanResponse = AdvertiseData.Builder().addServiceData(parcelUuid, shortName).build()
-        adv.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        try {
+            adv.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        } catch (e: Exception) {
+            advertisingStartPending = false
+            throw e
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun restartAdvertising() {
-        if (meshRunning && gattServiceReady) startAdvertising()
+        if (meshRunning && gattServiceReady) {
+            try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) { }
+            isAdvertising = false
+            advertisingStartPending = false
+            startAdvertising()
+        }
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            runOnUiThread { meshRunning = true; statusText = "Visible to nearby devices"; refreshNav() }
+            runOnUiThread {
+                advertisingStartPending = false
+                isAdvertising = true
+                meshRunning = true
+                statusText = "Visible to nearby devices"
+                refreshNav()
+            }
         }
         override fun onStartFailure(errorCode: Int) {
             runOnUiThread {
+                advertisingStartPending = false
+                isAdvertising = false
                 meshRunning = false
                 statusText = "Advertising unavailable ($errorCode)"
                 Toast.makeText(this@MainActivity, "Bluetooth advertising could not start ($errorCode).", Toast.LENGTH_LONG).show()
