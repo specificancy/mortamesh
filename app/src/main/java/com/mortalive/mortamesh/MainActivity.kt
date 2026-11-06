@@ -90,14 +90,7 @@ import java.util.concurrent.Executors
 import java.util.Locale
 import kotlin.math.max
 
-class MainActivity : Activity() {
-    private val blue = 0xFF1877F2.toInt()
-    private val blueLight = 0xFFEAF2FF.toInt()
-    private val ink = 0xFF172033.toInt()
-    private val muted = 0xFF667085.toInt()
-    private val background = 0xFFF6F8FC.toInt()
-    private val border = 0xFFE6EAF1.toInt()
-    private val white = 0xFFFFFFFF.toInt()
+class MainActivity : UiKitActivity() {
     private val green = 0xFF159467.toInt()
 
     private lateinit var content: FrameLayout
@@ -138,6 +131,9 @@ class MainActivity : Activity() {
     private var isScanning = false
     private var scanAvailable = true
     private var lastPeerRenderAt = 0L
+    private var scrollableScreen: ScrollView? = null
+    private var scrollableScreenId: Screen? = null
+    private var permissionsPermanentlyDenied = false
     private var statusText = "Not connected"
     private var chatColumn: LinearLayout? = null
     private var chatScroll: ScrollView? = null
@@ -163,9 +159,19 @@ class MainActivity : Activity() {
     private var worldComposer: EditText? = null
     private var worldCharCounter: TextView? = null
     private var worldLinkStatus: TextView? = null
+    private var worldPostFeedback: TextView? = null
 
     private data class NearbyPeer(val device: BluetoothDevice, var name: String, var lastSeen: Long = System.currentTimeMillis())
-    private data class ChatMessage(val text: String, val mine: Boolean, val timestamp: Long = System.currentTimeMillis())
+    private data class ChatMessage(
+        val text: String,
+        val mine: Boolean,
+        val timestamp: Long = System.currentTimeMillis(),
+        val mediaMimeType: String? = null,
+        val mediaSize: Long = 0L,
+        val deliveryState: String? = null,
+        val requiredTransport: String? = null,
+        val transferId: String? = null
+    )
     private data class MeshRoute(val nodeId: String, val name: String, val nextHop: String, val hops: Int, val lastSeen: Long = System.currentTimeMillis())
     private data class IncomingTextFragments(val total: Int, val parts: MutableMap<Int, String>, val createdAt: Long)
     private val nearbyPeers = linkedMapOf<String, NearbyPeer>()
@@ -176,6 +182,7 @@ class MainActivity : Activity() {
     private val physicalNodeByTransport = linkedMapOf<String, String>()
     private val meshRoutes = linkedMapOf<String, MeshRoute>()
     private val identityRecords = linkedMapOf<String, JSONObject>()
+    private val keyChangedContacts = linkedSetOf<String>()
     private val seenIdentityAdvertisements = linkedMapOf<String, Long>()
     private val seenMeshPackets = linkedMapOf<String, Long>()
     private val meshIngressLimiter = IngressRateLimiter(maxPerPeer = 240, maxGlobal = 1_200)
@@ -242,6 +249,7 @@ class MainActivity : Activity() {
                 if (expired) renderIfBrowseScreen()
                 gossipLocalIdentity()
                 mediaReceiveExecutor.execute { reapExpiredIncomingMedia() }
+                wifiAutoTick()
             } catch (_: Exception) {
                 // One radio error must not stop future route refreshes.
             } finally {
@@ -283,6 +291,8 @@ class MainActivity : Activity() {
         const val MEDIA_BLE_CHUNK_BYTES = 900
         const val WIFI_MAX_FRAME_CHARS = 400_000
         const val WIFI_HELLO_TIMEOUT_MS = 15_000
+        const val KEY_CHANGED_KEY_PREFIX = "mesh_key_changed_contact_"
+        const val VERIFIED_FINGERPRINT_PREFIX = "mesh_verified_fingerprint_"
     }
 
     private val wifiChannelListener: WifiP2pManager.ChannelListener = WifiP2pManager.ChannelListener {
@@ -300,6 +310,10 @@ class MainActivity : Activity() {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         }
         preferences = getSharedPreferences("morta_mesh_local", Context.MODE_PRIVATE)
+        permissionsPermanentlyDenied = preferences.getBoolean("nearby_permissions_permanently_denied", false)
+        preferences.all.keys
+            .filter { it.startsWith(KEY_CHANGED_KEY_PREFIX) && preferences.getBoolean(it, false) }
+            .forEach { keyChangedContacts.add(it.removePrefix(KEY_CHANGED_KEY_PREFIX)) }
         replayGuard = ReplayGuard(this)
         worldChatStore = WorldChatStore(this)
         anonymousSubmissionStore = AnonymousSubmissionStore(this)
@@ -340,12 +354,13 @@ class MainActivity : Activity() {
             setBackgroundColor(white)
             elevation = dp(8).toFloat()
             setPadding(dp(8), dp(4), dp(8), dp(4))
+            minimumHeight = dp(64)
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(this@MainActivity.background)
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-            addView(navBar, LinearLayout.LayoutParams(-1, dp(64)))
+            addView(navBar, LinearLayout.LayoutParams(-1, -2))
         }
         setContentView(root)
         render()
@@ -353,10 +368,12 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        uiVisible = true
         if (!wifiReceiverRegistered) {
             val filter = IntentFilter().apply {
                 addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
             }
@@ -376,11 +393,20 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (permissionsPermanentlyDenied && hasBluetoothRuntimePermissions() && hasWifiDirectRuntimePermission()) {
+            permissionsPermanentlyDenied = false
+            preferences.edit().putBoolean("nearby_permissions_permanently_denied", false).apply()
+            startAvailableTransports()
+            if (currentScreen == Screen.HOME || currentScreen == Screen.NEARBY) render()
+        }
         if (currentScreen == Screen.VAULT) render() else refreshNav()
         retryQueuedMedia()
+        autoStartTransportsOnce()
+        wifiAutoTick()
     }
 
     override fun onStop() {
+        uiVisible = false
         vaultUnlocked = false
         openingVaultPreview = false
         try { privateMediaDialog?.dismiss() } catch (_: Exception) { }
@@ -423,51 +449,7 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun rounded(color: Int, radiusDp: Int, strokeColor: Int? = null): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = dp(radiusDp).toFloat()
-        if (strokeColor != null) setStroke(dp(1), strokeColor)
-    }
-
-    private fun label(text: String, size: Float, color: Int = ink, bold: Boolean = false): TextView = TextView(this).apply {
-        this.text = text
-        textSize = size
-        setTextColor(color)
-        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        gravity = Gravity.CENTER_VERTICAL
-        includeFontPadding = false
-    }
-
     private fun vSpace(height: Int): View = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(height)) }
-
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(16))
-        background = rounded(white, 20, border)
-        elevation = dp(1).toFloat()
-    }
-
-    private fun primaryButton(text: String, onClick: () -> Unit): TextView = label(text, 14f, white, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(12), dp(9), dp(12), dp(9))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        background = rounded(blue, 11)
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-    }
-
-    private fun secondaryButton(text: String, onClick: () -> Unit): TextView = label(text, 13f, blue, true).apply {
-        gravity = Gravity.CENTER
-        setPadding(dp(10), dp(8), dp(10), dp(8))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        background = rounded(blueLight, 11)
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-    }
 
     private fun page(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -529,6 +511,8 @@ class MainActivity : Activity() {
         worldComposer = null
         worldCharCounter = null
         worldLinkStatus = null
+        worldPostFeedback = null
+        val previousScrollY = if (scrollableScreenId == currentScreen) scrollableScreen?.scrollY ?: 0 else 0
         content.removeAllViews()
         val view = when (currentScreen) {
             Screen.HOME -> buildHome()
@@ -541,26 +525,34 @@ class MainActivity : Activity() {
             Screen.ANONYMOUS_POST -> buildAnonymousPost()
         }
         content.addView(view, FrameLayout.LayoutParams(-1, -1))
+        scrollableScreen = view as? ScrollView
+        scrollableScreenId = currentScreen
+        scrollableScreen?.let { restored ->
+            restored.post { restored.scrollTo(0, previousScrollY) }
+        }
         refreshNav()
     }
 
     private fun buildHome(): View {
         val p = page()
-        addBrandHeader(p, if (meshRunning || wifiDiscovering) "Visible" else "Go online") { ensureBluetoothPermissionsAndStart() }
+        addBrandHeader(p, if (meshRunning || wifiDiscovering) "Visible" else "Start nearby discovery") { ensureBluetoothPermissionsAndStart() }
 
         val hero = card().apply {
             background = rounded(0xFFEDF4FF.toInt(), 24)
             setPadding(dp(20), dp(22), dp(20), dp(20))
             addView(label("Your people,\nwithin reach.", 28f, 0xFF12315B.toInt(), true))
-            addView(label("Text messages use available nearby links. Photos use Bluetooth; videos use Wi-Fi Direct only. Unsent media stays queued for its intended recipient.", 14f, 0xFF46607E.toInt()).apply {
+            addView(label("Find nearby people and start private, end-to-end encrypted conversations. Unsent media stays queued for its intended recipient.", 14f, 0xFF46607E.toInt()).apply {
                 setLineSpacing(dp(3).toFloat(), 1f)
                 setPadding(0, dp(12), 0, dp(18))
             })
             addView(primaryButton(if (isScanning || wifiDiscovering) "Searching nearby…" else "Find nearby devices") { ensureBluetoothPermissionsAndStart() })
+            addView(vSpace(8))
+            addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
             addView(vSpace(10))
             addView(secondaryButton("Open conversations") { currentScreen = Screen.CHATS; render() })
         }
         p.addView(hero)
+        addPermissionsNeededCard(p)
         p.addView(vSpace(18))
 
         val status = card()
@@ -573,8 +565,11 @@ class MainActivity : Activity() {
         }
         statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(28), dp(28)))
         val statusColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        statusColumn.addView(label(if (online) "Nearby discovery is active" else "Your device is offline", 14f, ink, true))
-        statusColumn.addView(label("Photos · Bluetooth\nVideos · Wi-Fi Direct", 12f, muted).apply { setPadding(0, dp(4), 0, 0) })
+        statusColumn.addView(label(if (online) "Nearby discovery is active" else "Nearby discovery is off", 14f, ink, true))
+        statusColumn.addView(label(
+            if (online) "Nearby discovery is active" else "No nearby search is running",
+            12f, muted
+        ).apply { setPadding(0, dp(4), 0, 0) })
         statusRow.addView(statusColumn, LinearLayout.LayoutParams(0, -2, 1f))
         status.addView(statusRow)
         p.addView(status)
@@ -607,10 +602,9 @@ class MainActivity : Activity() {
         val p = page()
         addBrandHeader(p, "Scan again") { ensureBluetoothPermissionsAndStart(forceRescan = true) }
         addSectionTitle(p, "Nearby devices", if (isScanning || wifiDiscovering) "Searching over both nearby transports…" else "Choose the faster Wi-Fi Direct link or Bluetooth LE")
+        addPermissionsNeededCard(p)
         p.addView(vSpace(14))
-        val explainer = card()
-        explainer.addView(label("Text uses available nearby links. Photos always use Bluetooth LE; videos use Wi-Fi Direct only. Unsent media waits in the Private Vault queue for its intended recipient. Both phones need Morta Mesh open. Compare fingerprints in Peer info before sharing sensitive content.", 13f, muted).apply { setLineSpacing(dp(3).toFloat(), 1f) })
-        p.addView(explainer)
+        p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         p.addView(vSpace(16))
         if (wifiPeers.isEmpty()) {
             p.addView(label("WI-FI DIRECT · HIGHER SPEED", 10f, blue, true).apply { letterSpacing = .08f })
@@ -719,8 +713,18 @@ class MainActivity : Activity() {
                 }
                 box.addView(AvatarView(this, nameFor(id)), LinearLayout.LayoutParams(dp(46), dp(46)))
                 val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, 0, 0) }
+                val nodeId = resolveTargetNode(id)
+                val status = identityVerificationStatus(nodeId)
+                box.contentDescription = "Conversation with ${nameFor(id)}. Identity status: $status. Double tap to open."
                 col.addView(label(nameFor(id), 14f, ink, true))
-                col.addView(label(last.text.take(44), 12f, muted).apply { setPadding(0, dp(5), 0, 0) })
+                col.addView(label(status, 11f, if (status == "Key changed") 0xFFB42318.toInt() else if (status == "Verified") green else muted, status == "Key changed").apply {
+                    setPadding(0, dp(4), 0, 0)
+                })
+                col.addView(label(last.text, 12f, muted).apply {
+                    setPadding(0, dp(5), 0, 0)
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
                 box.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
                 box.addView(label("›", 26f, muted))
                 p.addView(box); p.addView(vSpace(9))
@@ -971,17 +975,20 @@ class MainActivity : Activity() {
         }
         top.addView(label("‹", 32f, blue, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(3), 0, dp(12), 0)
+            contentDescription = "Back to conversations"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
             setOnClickListener { currentScreen = Screen.CHATS; render() }
-        }, LinearLayout.LayoutParams(dp(38), dp(44)))
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         val titleColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleColumn.addView(label("World Chat", 16f, ink, true))
         titleColumn.addView(label("PUBLIC · MESH BROADCAST", 9.5f, muted, true).apply { letterSpacing = .06f; setPadding(0, dp(4), 0, 0) })
         top.addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(label("●", 13f, if (connectedTransportIds().isNotEmpty()) green else muted))
-        wrapper.addView(top, LinearLayout.LayoutParams(-1, dp(64)))
+        top.minimumHeight = dp(64)
+        wrapper.addView(top, LinearLayout.LayoutParams(-1, -2))
 
         val explainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1060,11 +1067,21 @@ class MainActivity : Activity() {
             isFocusable = true
             setOnClickListener { sendWorldChatPost() }
         }
-        inputRow.addView(send, LinearLayout.LayoutParams(dp(42), dp(42)).apply { leftMargin = dp(7) })
+        inputRow.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(7) })
         composerShell.addView(inputRow)
         composerShell.addView(label("500 characters max · public and signed · no media in World Chat", 10f, muted).apply {
             setPadding(dp(2), dp(6), 0, 0)
         })
+        val publicNotice = label("PUBLIC · ANYONE IN RANGE CAN READ", 11f, 0xFFB42318.toInt(), true).apply {
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+            contentDescription = "Public World Chat. Anyone in range can read posts."
+        }
+        composerShell.addView(publicNotice, 0)
+        worldPostFeedback = label("", 12f, 0xFFB42318.toInt(), true).apply {
+            visibility = View.GONE
+            setPadding(dp(4), dp(5), dp(4), dp(4))
+        }
+        composerShell.addView(worldPostFeedback, 1)
         wrapper.addView(composerShell, LinearLayout.LayoutParams(-1, -2))
         return wrapper
     }
@@ -1132,16 +1149,25 @@ class MainActivity : Activity() {
         }
         when (worldChatStore.insertIfNew(post)) {
             WorldChatStore.InsertResult.RATE_LIMITED -> {
+                worldPostFeedback?.apply {
+                    this.text = "Rate limit reached · wait before posting again (maximum 5 posts per minute)."
+                    visibility = View.VISIBLE
+                }
                 Toast.makeText(this, "World Chat allows up to 5 posts per minute.", Toast.LENGTH_LONG).show()
                 return
             }
             WorldChatStore.InsertResult.STORAGE_ERROR -> {
+                worldPostFeedback?.apply {
+                    this.text = "This post could not be saved safely, so it was not broadcast."
+                    visibility = View.VISIBLE
+                }
                 Toast.makeText(this, "The post could not be saved safely. It was not broadcast.", Toast.LENGTH_LONG).show()
                 return
             }
             WorldChatStore.InsertResult.DUPLICATE -> return
             WorldChatStore.InsertResult.INSERTED -> Unit
         }
+        worldPostFeedback?.visibility = View.GONE
         input.text.clear()
         renderWorldTimeline()
         val sent = broadcastWorldPost(post, null)
@@ -1172,6 +1198,53 @@ class MainActivity : Activity() {
                 val frame = worldPostFrame(post, WORLD_CHAT_TTL)
                 if (frame.toByteArray(Charsets.UTF_8).size <= MAX_WORLD_CHAT_FRAME_BYTES) sendTextToPeer(peerId, frame)
             } catch (_: Exception) { }
+        }
+    }
+
+    private fun confirmDeleteVaultItem(item: PrivateVault.Item) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete private media?")
+            .setMessage("${item.fileName} will be removed from this device's private vault.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                if (!privateVault.delete(item)) {
+                    Toast.makeText(this, "The vault item could not be deleted.", Toast.LENGTH_LONG).show()
+                }
+                render()
+            }
+            .show()
+    }
+
+    /** One reusable bottom sheet explains the private-media transport rule without repeating it on every screen. */
+    private fun showMediaTravelInfo() {
+        val dialog = Dialog(this)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(22), dp(22), dp(24))
+            background = rounded(white, 22, border)
+            addView(label("How media travels", 20f, ink, true))
+            addView(label("PRIVATE CHAT", 11f, blue, true).apply { setPadding(0, dp(16), 0, dp(5)) })
+            addView(label("Text uses an available nearby encrypted link. Photos use Bluetooth LE only. Videos use Wi-Fi Direct only. Media is sent directly to its intended recipient and is never relayed through other mesh devices.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(label("PRIVATE VAULT", 11f, blue, true).apply { setPadding(0, dp(14), 0, dp(5)) })
+            addView(label("If the required direct link is unavailable, encrypted media stays queued in the Private Vault until the recipient can reconnect. Previews are available only after the Vault is unlocked.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(label("SEPARATE SPACES", 11f, blue, true).apply { setPadding(0, dp(14), 0, dp(5)) })
+            addView(label("World Chat posts are public to connected mesh devices. Anonymous group submissions remain encrypted local drafts; they are not published or uploaded.", 13f, muted).apply {
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            addView(vSpace(16))
+            addView(primaryButton("Got it") { dialog.dismiss() })
+        }
+        dialog.setContentView(sheet)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(rounded(white, 22))
+            setLayout(-1, -2)
+            setGravity(Gravity.BOTTOM)
         }
     }
 
@@ -1235,8 +1308,10 @@ class MainActivity : Activity() {
             empty.gravity = Gravity.CENTER_HORIZONTAL
             empty.setPadding(dp(18), dp(24), dp(18), dp(24))
             empty.addView(label("Your vault is empty", 16f, ink, true).apply { gravity = Gravity.CENTER })
-            empty.addView(label("Photos use Bluetooth. Videos use Wi-Fi Direct only. Unsent items stay queued here until their intended recipient reconnects.", 13f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) })
+            empty.addView(label("No private media yet. Captured and received items are encrypted here and never added to your Gallery.", 13f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0) })
             p.addView(empty)
+            p.addView(vSpace(10))
+            p.addView(secondaryButton("How media travels  ⓘ") { showMediaTravelInfo() })
         } else {
             items.forEach { item ->
                 val row = card().apply {
@@ -1247,14 +1322,7 @@ class MainActivity : Activity() {
                     isFocusable = true
                     setOnClickListener { openPrivateMedia(item) }
                     setOnLongClickListener {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Delete private media?")
-                            .setMessage("${item.fileName} will be removed from this device's private vault.")
-                            .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Delete") { _, _ ->
-                                privateVault.delete(item)
-                                render()
-                            }.show()
+                        confirmDeleteVaultItem(item)
                         true
                     }
                 }
@@ -1278,6 +1346,12 @@ class MainActivity : Activity() {
                 }
                 col.addView(label(transferLabel, 11f, if (item.transferState == "QUEUED") blue else muted).apply { setPadding(0, dp(3), 0, 0) })
                 col.addView(label(java.text.SimpleDateFormat("dd MMM · HH:mm", Locale.getDefault()).format(java.util.Date(item.createdAt)), 11f, muted).apply { setPadding(0, dp(3), 0, 0) })
+                col.addView(secondaryButton("Delete") { confirmDeleteVaultItem(item) }.apply {
+                    setTextColor(0xFFB42318.toInt())
+                    background = rounded(0xFFFFEDEC.toInt(), 10)
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(6)
+                })
                 if (item.direction == "Sent" && item.recipientId.isNullOrBlank() &&
                     item.transferId.isNullOrBlank() && item.transferState.isBlank()) {
                     col.addView(secondaryButton("Retry delivery") { retryLegacyVaultItem(item) }.apply {
@@ -1295,6 +1369,13 @@ class MainActivity : Activity() {
         p.addView(vSpace(8))
         p.addView(secondaryButton("Lock vault now") { vaultUnlocked = false; render() })
         return scrollPage(p)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun appVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+    } catch (_: Exception) {
+        "unknown"
     }
 
     private fun buildSettings(): View {
@@ -1371,7 +1452,7 @@ class MainActivity : Activity() {
         p.addView(privacy)
         p.addView(vSpace(12))
         val info = card()
-        info.addView(label("Morta Mesh · Prototype 0.7.0", 14f, ink, true))
+        info.addView(label("Morta Mesh · v${appVersionName()}", 14f, ink, true))
         info.addView(label("Offline-first Android messaging with Wi-Fi Direct and Bluetooth LE.", 12f, muted).apply { setPadding(0, dp(7), 0, 0) })
         p.addView(info)
         return scrollPage(p)
@@ -1389,10 +1470,13 @@ class MainActivity : Activity() {
         }
         top.addView(label("‹", 32f, blue, true).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(3), 0, dp(10), 0)
+            contentDescription = "Back to conversations"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
+            isFocusable = true
             setOnClickListener { activeChatId = null; currentScreen = Screen.CHATS; render() }
-        }, LinearLayout.LayoutParams(dp(38), dp(44)))
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         top.addView(AvatarView(this, peerId?.let { nameFor(it) } ?: "M"), LinearLayout.LayoutParams(dp(40), dp(40)))
         val headerColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
         headerColumn.addView(label(peerId?.let { nameFor(it) } ?: "Conversation", 15f, ink, true))
@@ -1405,9 +1489,40 @@ class MainActivity : Activity() {
             else if (chatConnected) if (isWifiChat) "Connected · Wi-Fi Direct · E2E encrypted" else "Connected · Bluetooth · E2E encrypted"
             else if (isMeshChat) "Waiting for a mesh route" else if (isWifiChat) "Wi-Fi Direct · connecting" else "Bluetooth LE · nearby"
         headerColumn.addView(label(connectionLabel, 11f, if (chatConnected) green else muted).apply { setPadding(0, dp(4), 0, 0) })
+        val peerNodeId = peerId?.let { resolveTargetNode(it) }
+        val verification = identityVerificationStatus(peerNodeId)
+        headerColumn.addView(label(
+            verification,
+            11f,
+            when (verification) { "Verified" -> green; "Key changed" -> 0xFFB42318.toInt(); else -> muted },
+            verification == "Key changed"
+        ).apply { setPadding(0, dp(3), 0, 0) })
+        val keyChanged = verification == "Key changed"
         top.addView(headerColumn, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(label("⋯", 24f, muted).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(8), dp(8), dp(8)); isClickable = true; setOnClickListener { showPeerInfo() } })
-        wrapper.addView(top, LinearLayout.LayoutParams(-1, dp(66)))
+        top.addView(label("⋯", 24f, muted).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Peer identity and safety details"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showPeerInfo() }
+        })
+        top.minimumHeight = dp(66)
+        wrapper.addView(top, LinearLayout.LayoutParams(-1, -2))
+        if (keyChanged) {
+            val warning = card().apply {
+                background = rounded(0xFFFFEDEC.toInt(), 12, 0xFFFDA29B.toInt())
+                addView(label("KEY CHANGED · CHAT BLOCKED", 12f, 0xFFB42318.toInt(), true))
+                addView(label("The peer is advertising a different identity key. Do not send messages or media. Confirm their identity through another trusted channel; the app will not silently accept the new key.", 12f, 0xFF912018.toInt()).apply {
+                    setPadding(0, dp(6), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                })
+            }
+            wrapper.addView(warning, LinearLayout.LayoutParams(-1, -2).apply {
+                leftMargin = dp(12); rightMargin = dp(12); topMargin = dp(8)
+            })
+        }
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -1439,7 +1554,9 @@ class MainActivity : Activity() {
             setBackgroundColor(white)
         }
         val composer = EditText(this).apply {
-            hint = "Message nearby…"
+            hint = if (keyChanged) "Messaging paused · identity key changed" else "Message nearby…"
+            isEnabled = !keyChanged
+            alpha = if (keyChanged) 0.55f else 1f
             textSize = 14f
             setTextColor(ink)
             setHintTextColor(0xFF98A2B3.toInt())
@@ -1453,8 +1570,8 @@ class MainActivity : Activity() {
             }
         }
         currentComposer = composer
-        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }, LinearLayout.LayoutParams(dp(34), dp(40)).apply { rightMargin = dp(4) })
-        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }, LinearLayout.LayoutParams(dp(34), dp(40)).apply { rightMargin = dp(5) })
+        composerShell.addView(mediaActionButton("▧", "Take photo") { launchPhotoCapture() }.apply { isEnabled = !keyChanged }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(4) })
+        composerShell.addView(mediaActionButton("●", "Record video") { launchVideoCapture() }.apply { isEnabled = !keyChanged }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(5) })
         composerShell.addView(composer, LinearLayout.LayoutParams(0, -2, 1f))
         val send = TextView(this).apply {
             text = "↑"
@@ -1462,10 +1579,16 @@ class MainActivity : Activity() {
             setTextColor(white)
             gravity = Gravity.CENTER
             background = rounded(blue, 16)
+            contentDescription = "Send message"
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
+            isFocusable = true
+            isEnabled = !keyChanged
+            alpha = if (keyChanged) 0.55f else 1f
             setOnClickListener { sendComposerMessage() }
         }
-        composerShell.addView(send, LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(5) })
+        composerShell.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(5) })
         wrapper.addView(composerShell, LinearLayout.LayoutParams(-1, -2))
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
         return wrapper
@@ -1474,6 +1597,8 @@ class MainActivity : Activity() {
     private fun mediaActionButton(symbol: String, description: String, action: () -> Unit): TextView = label(symbol, 21f, blue, true).apply {
         gravity = Gravity.CENTER
         contentDescription = description
+        minimumWidth = dp(48)
+        minimumHeight = dp(48)
         background = rounded(blueLight, 13)
         isClickable = true
         isFocusable = true
@@ -1484,6 +1609,10 @@ class MainActivity : Activity() {
     private fun launchVideoCapture() = launchCapture(video = true)
 
     private fun launchCapture(video: Boolean) {
+        if (isContactKeyChanged(activeChatId)) {
+            Toast.makeText(this, "Media blocked: this contact's identity key changed.", Toast.LENGTH_LONG).show()
+            return
+        }
         if (activeChatId.isNullOrBlank()) {
             Toast.makeText(this, "Open a conversation before capturing media.", Toast.LENGTH_SHORT).show()
             return
@@ -1531,12 +1660,23 @@ class MainActivity : Activity() {
                 if (preparedFile != plainFile) preparedFile.delete()
                 plainFile.delete()
 
+                val requiredTransport = if (preparedMime.startsWith("video/")) "Wi-Fi Direct" else "Bluetooth LE"
+                runOnUiThread {
+                    appendMessage(peerId, ChatMessage(
+                        text = if (preparedMime.startsWith("video/")) "Video" else "Photo",
+                        mine = true,
+                        mediaMimeType = preparedMime,
+                        mediaSize = item.size,
+                        deliveryState = "QUEUED",
+                        requiredTransport = requiredTransport,
+                        transferId = transferId
+                    ))
+                }
+
                 val target = chooseMediaTransport(recipient, preparedMime)
                 if (target == null) {
                     runOnUiThread {
-                        appendMessage(peerId, ChatMessage(
-                            "🔒 ${if (isVideo) "Video" else "Photo"} queued · waiting for ${if (isVideo) "Wi-Fi Direct" else "Bluetooth"}", true
-                        ))
+                        if (isVideo) prepareWifiForVideo()
                         Toast.makeText(
                             this,
                             "${if (isVideo) "Video needs Wi-Fi Direct" else "Photo uses Bluetooth"}; the encrypted item is queued for $peerName. It will send when that recipient is directly connected on that link type (media is never relayed).",
@@ -1674,6 +1814,7 @@ class MainActivity : Activity() {
                 if (privateVault.updateTransferState(item.id, "SENDING") == null) {
                     throw java.io.IOException("Could not persist transfer state in the vault")
                 }
+                updateChatMediaState(item.chatPeerId, transferId, "SENDING")
                 val chunkSize = if (wifi) MEDIA_WIFI_CHUNK_BYTES else MEDIA_BLE_CHUNK_BYTES
                 val start = listOf(
                     MEDIA_WIRE_PREFIX + "S", transferId,
@@ -1719,11 +1860,14 @@ class MainActivity : Activity() {
                 val delivered = privateVault.transferById(transferId)?.transferState == "DELIVERED"
                 runOnUiThread {
                     if (delivered && failure == null) {
+                        updateChatMediaState(item.chatPeerId, transferId, "DELIVERED")
                         Toast.makeText(this, "${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} delivered to ${item.peerName}.", Toast.LENGTH_LONG).show()
                     } else if (!delivered && failure != null) {
+                        updateChatMediaState(item.chatPeerId, transferId, "QUEUED")
                         Toast.makeText(this, "Media remains queued for ${item.peerName}: ${failure.message ?: "connection interrupted"}. It will retry when the recipient is reachable.", Toast.LENGTH_LONG).show()
                     }
                     if (currentScreen == Screen.VAULT) render()
+                    wifiAutoTick()
                 }
             }
         }.apply { name = "MortaMesh-MediaSend"; isDaemon = true; start() }
@@ -1892,13 +2036,17 @@ class MainActivity : Activity() {
         reapExpiredIncomingMedia()
         val parts = text.split("|")
         if (parts.size < 3) return true
-        if (parts[1] == "S" || parts[1] == "C" || parts[1] == "E") {
+        if (parts[1] == "S" || parts[1] == "C" || parts[1] == "E" || parts[1] == "W") {
             // Media must arrive over a direct physical link from its authenticated sender.
             val direct = sourceTransportId != null && fromNodeId != null &&
                 synchronized(physicalNodeByTransport) { physicalNodeByTransport[sourceTransportId] == fromNodeId }
             if (!direct) return true
         }
         when (parts[1]) {
+            "W" -> {
+                handleWifiLinkOffer(peerId, parts, fromNodeId)
+                return true
+            }
             "S" -> {
                 if (parts.size < 6) return true
                 val transferId = parts[2]
@@ -1999,7 +2147,15 @@ class MainActivity : Activity() {
                     // finish() returns only after the receiver's encrypted file and index commit.
                     sendMediaWireText(peerId, peerId, "${MEDIA_WIRE_PREFIX}A|${session.writer.transferId}", strict = false)
                     runOnUiThread {
-                        appendMessage(peerId, ChatMessage("🔒 ${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} received · saved in Private Vault", false))
+                        appendMessage(peerId, ChatMessage(
+                            text = if (item.mimeType.startsWith("video/")) "Video" else "Photo",
+                            mine = false,
+                            mediaMimeType = item.mimeType,
+                            mediaSize = item.size,
+                            deliveryState = "RECEIVED",
+                            requiredTransport = if (item.mimeType.startsWith("video/")) "Wi-Fi Direct" else "Bluetooth LE",
+                            transferId = item.transferId
+                        ))
                         if (currentScreen == Screen.VAULT) render()
                         Toast.makeText(this, "Received and saved in Private Vault.", Toast.LENGTH_LONG).show()
                     }
@@ -2014,7 +2170,7 @@ class MainActivity : Activity() {
                     mediaAckWaiters[transferId]?.countDown()
                     if (firstReceipt) runOnUiThread {
                         val chatId = item.chatPeerId ?: item.recipientId ?: peerId
-                        appendMessage(chatId, ChatMessage("✓ ${if (item.mimeType.startsWith("video/")) "Video" else "Photo"} delivered to ${item.peerName}", true))
+                        updateChatMediaState(chatId, transferId, "DELIVERED")
                         if (currentScreen == Screen.VAULT) render()
                     }
                 }
@@ -2203,6 +2359,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "${peer.name}, ${if (clientReady.contains(peer.device.address) || subscribedDevices.contains(peer.device.address)) "connected" else "nearby device"}. Double tap to chat."
             setOnClickListener { openChat(peer.device.address) }
         }
         row.addView(AvatarView(this, peer.name), LinearLayout.LayoutParams(dp(46), dp(46)))
@@ -2227,6 +2384,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "$displayName, ${if (connected) "connected over Wi-Fi Direct" else "nearby over Wi-Fi Direct"}. Double tap to chat."
             setOnClickListener {
                 peerNames[chatId] = displayName
                 persistPeerNames()
@@ -2249,6 +2407,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             isClickable = true
             isFocusable = true
+            contentDescription = "${route.name}, relayed through ${route.hops} hops with end-to-end encryption. Double tap to chat."
             setOnClickListener { openChat(id) }
             addView(AvatarView(this@MainActivity, route.name), LinearLayout.LayoutParams(dp(46), dp(46)))
             val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(4), 0) }
@@ -2270,15 +2429,97 @@ class MainActivity : Activity() {
             setPadding(dp(13), dp(10), dp(13), dp(8))
             background = rounded(if (message.mine) blue else white, 17, if (message.mine) null else border)
         }
-        val text = label(message.text, 14f, if (message.mine) white else ink)
-        text.setLineSpacing(dp(2).toFloat(), 1f)
-        bubble.addView(text)
-        bubble.addView(label(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)), 9f, if (message.mine) 0xFFD9E8FF.toInt() else muted).apply {
+        if (!message.mediaMimeType.isNullOrBlank()) {
+            val isVideo = message.mediaMimeType.startsWith("video/")
+            val mediaRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            mediaRow.addView(label(if (isVideo) "▶" else "▧", 22f, if (message.mine) white else blue, true).apply {
+                gravity = Gravity.CENTER
+                background = rounded(if (message.mine) 0xFF3D8BF4.toInt() else blueLight, 10)
+                minimumWidth = dp(44)
+                minimumHeight = dp(44)
+            })
+            val detail = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(10), 0, 0, 0)
+            }
+            val mediaName = if (isVideo) "Video" else "Photo"
+            detail.addView(label("$mediaName · ${formatBytes(message.mediaSize)}", 13f, if (message.mine) white else ink, true))
+            val deliveredTransport = when (message.requiredTransport) {
+                "Bluetooth LE" -> "Bluetooth"
+                else -> message.requiredTransport ?: "nearby link"
+            }
+            val stateText = when (message.deliveryState) {
+                "QUEUED" -> if (isVideo && Build.VERSION.SDK_INT >= 29) {
+                    "Connecting over Wi-Fi Direct automatically…"
+                } else {
+                    "Queued · needs ${message.requiredTransport ?: "nearby link"}"
+                }
+                "SENDING" -> "Sending · ${message.requiredTransport ?: "nearby link"}"
+                "DELIVERED" -> "Delivered over $deliveredTransport"
+                "RECEIVED" -> "Received · saved in Private Vault"
+                else -> "Saved in Private Vault"
+            }
+            val stateColor = when (message.deliveryState) {
+                "DELIVERED", "RECEIVED" -> if (message.mine) 0xFFD7FBE9.toInt() else green
+                "QUEUED" -> if (message.mine) 0xFFFFE3B8.toInt() else 0xFF9A6700.toInt()
+                else -> if (message.mine) 0xFFD9E8FF.toInt() else muted
+            }
+            val stateBackground = when (message.deliveryState) {
+                "DELIVERED", "RECEIVED" -> 0xFFE6F8EF.toInt()
+                "QUEUED" -> 0xFFFFF4E5.toInt()
+                else -> if (message.mine) 0xFF3D8BF4.toInt() else 0xFFF2F4F7.toInt()
+            }
+            detail.addView(label(stateText, 11f, stateColor).apply {
+                background = rounded(stateBackground, 99)
+                setPadding(dp(7), dp(4), dp(7), dp(4))
+            })
+            mediaRow.addView(detail, LinearLayout.LayoutParams(0, -2, 1f))
+            bubble.addView(mediaRow)
+            bubble.contentDescription = "$mediaName, ${formatBytes(message.mediaSize)}. $stateText. Open in Private Vault."
+            bubble.isClickable = true
+            bubble.isFocusable = true
+            bubble.setOnClickListener {
+                val transferId = message.transferId
+                val item = transferId?.let { privateVault.transferById(it) }
+                if (item != null) openPrivateMedia(item)
+                else Toast.makeText(this, "This media item is no longer in the Private Vault.", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            val text = label(message.text, 14f, if (message.mine) white else ink)
+            text.setLineSpacing(dp(2).toFloat(), 1f)
+            bubble.addView(text)
+            if (message.mine && message.deliveryState == "SENT_TO_LINK") {
+                bubble.addView(label("Sent to nearby link · not a delivery receipt", 11f, 0xFFD9E8FF.toInt()).apply {
+                    gravity = Gravity.END
+                    setPadding(0, dp(5), 0, 0)
+                })
+            }
+        }
+        bubble.addView(label(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.timestamp)), 11f, if (message.mine) 0xFFD9E8FF.toInt() else muted).apply {
             gravity = Gravity.END
             setPadding(0, dp(6), 0, 0)
         })
         line.addView(bubble, LinearLayout.LayoutParams(-2, -2).apply { width = minOf(dp(290), (resources.displayMetrics.widthPixels * .78f).toInt()) })
         return line
+    }
+
+    private fun updateChatMediaState(peerId: String?, transferId: String, state: String) {
+        if (peerId.isNullOrBlank()) return
+        mainHandler.post {
+            val messages = chatHistory[peerId] ?: return@post
+            val index = messages.indexOfLast { it.transferId == transferId }
+            if (index < 0) return@post
+            messages[index] = messages[index].copy(deliveryState = state)
+            saveHistory()
+            if (currentScreen == Screen.CHAT && activeChatId == peerId) {
+                chatColumn?.removeAllViews()
+                messages.forEach { chatColumn?.addView(messageBubble(it)) }
+                chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
     }
 
     private fun appendMessage(peerId: String, message: ChatMessage) {
@@ -2295,6 +2536,10 @@ class MainActivity : Activity() {
 
     private fun sendComposerMessage() {
         val peerId = activeChatId ?: return
+        if (isContactKeyChanged(peerId)) {
+            Toast.makeText(this, "Message blocked: this contact's identity key changed. Verify out of band before continuing.", Toast.LENGTH_LONG).show()
+            return
+        }
         val input = currentComposer ?: return
         val text = input.text.toString().trim()
         if (text.isEmpty()) return
@@ -2312,7 +2557,7 @@ class MainActivity : Activity() {
             return
         }
         input.text.clear()
-        appendMessage(peerId, ChatMessage(text, true))
+        appendMessage(peerId, ChatMessage(text, true, deliveryState = "SENT_TO_LINK"))
     }
 
     private fun openChat(peerId: String) {
@@ -2335,29 +2580,89 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun identityVerificationStatus(nodeId: String?): String {
+        if (nodeId.isNullOrBlank()) return "Unverified"
+        if (keyChangedContacts.contains(nodeId) || preferences.getBoolean(KEY_CHANGED_KEY_PREFIX + nodeId, false)) {
+            return "Key changed"
+        }
+        val fingerprint = meshSecurity.fingerprintFor(nodeId) ?: return "Unverified"
+        val verified = preferences.getString(VERIFIED_FINGERPRINT_PREFIX + nodeId, null)
+        return if (verified == fingerprint) "Verified" else "Unverified"
+    }
+
+    private fun isContactKeyChanged(peerId: String?): Boolean {
+        val nodeId = peerId?.let { resolveTargetNode(it) } ?: return false
+        return identityVerificationStatus(nodeId) == "Key changed"
+    }
+
+    private fun recordKeyChanged(nodeId: String) {
+        if (nodeId.isBlank()) return
+        mainHandler.post {
+            keyChangedContacts.add(nodeId)
+            preferences.edit().putBoolean(KEY_CHANGED_KEY_PREFIX + nodeId, true).apply()
+            val activeNode = activeChatId?.let { resolveTargetNode(it) }
+            if ((currentScreen == Screen.CHAT && activeNode == nodeId) || currentScreen == Screen.CHATS) {
+                render()
+            }
+        }
+    }
+
+    private fun markContactVerified(nodeId: String, fingerprint: String) {
+        if (identityVerificationStatus(nodeId) == "Key changed") {
+            Toast.makeText(this, "A changed identity key cannot be verified from this screen.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val current = meshSecurity.fingerprintFor(nodeId)
+        if (current.isNullOrBlank() || current != fingerprint) {
+            Toast.makeText(this, "The peer fingerprint changed. Re-open peer info before verifying.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!preferences.edit().putString(VERIFIED_FINGERPRINT_PREFIX + nodeId, fingerprint).commit()) {
+            Toast.makeText(this, "Could not save this verification on the device.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Fingerprint marked as verified on this device.", Toast.LENGTH_SHORT).show()
+        render()
+    }
+
     private fun showPeerInfo() {
         val peer = activeChatId ?: return
         val nodeId = if (peer.startsWith(MESH_PREFIX)) peer.removePrefix(MESH_PREFIX) else nodeForTransport(peer)
         val fingerprint = nodeId?.let { meshSecurity.fingerprintFor(it) }
+        val status = identityVerificationStatus(nodeId)
+        val keyChanged = status == "Key changed"
         val route = nodeId?.let { meshRoutes[it] }
         val transport = when {
             peer.startsWith(MESH_PREFIX) && route != null && route.hops > 1 -> "Morta Mesh relay · ${route.hops} hops"
             peer.startsWith(WIFI_PREFIX) -> "Wi-Fi Direct"
             else -> "Bluetooth LE / nearby"
         }
-        val detail = if (fingerprint != null) {
-            "${nameFor(peer)}\n$transport\n\nIdentity fingerprint (compare the full value with your contact through another trusted channel):\n$fingerprint"
-        } else {
-            "${nameFor(peer)}\n$transport\n\nIdentity fingerprint is not available yet. Keep both apps open while identities exchange."
+        val groupedFingerprint = fingerprint?.filterNot { it.isWhitespace() }?.chunked(5)?.joinToString(" ")
+        val detail = buildString {
+            append(nameFor(peer)).append("\n").append(transport)
+            append("\n\nIdentity status: ").append(status)
+            if (keyChanged) {
+                append("\n\nThis peer is advertising a different identity key. Messages to this contact are blocked. The new key is not trusted or automatically accepted.")
+            } else if (groupedFingerprint != null) {
+                append("\n\nSHA-256 fingerprint (compare all groups with your contact through another trusted channel before marking verified):\n")
+                append(groupedFingerprint)
+            } else {
+                append("\n\nIdentity fingerprint is not available yet. Keep both apps open while identities exchange.")
+            }
         }
         val dialog = AlertDialog.Builder(this)
             .setTitle("Peer identity")
             .setMessage(detail)
             .setPositiveButton("Close", null)
-        if (fingerprint != null) dialog.setNeutralButton("Copy fingerprint") { _, _ ->
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Morta Mesh fingerprint", fingerprint))
-            Toast.makeText(this, "Fingerprint copied", Toast.LENGTH_SHORT).show()
+        if (fingerprint != null) {
+            dialog.setNeutralButton("Copy pinned fingerprint") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Morta Mesh fingerprint", groupedFingerprint))
+                Toast.makeText(this, "Pinned fingerprint copied", Toast.LENGTH_SHORT).show()
+            }
+        }
+        if (fingerprint != null && nodeId != null && !keyChanged && status != "Verified") {
+            dialog.setNegativeButton("Mark as verified") { _, _ -> markContactVerified(nodeId, fingerprint) }
         }
         dialog.show()
     }
@@ -2375,13 +2680,13 @@ class MainActivity : Activity() {
     private fun refreshNav() {
         if (!::navBar.isInitialized) return
         navBar.removeAllViews()
-        val items: List<Triple<Screen?, String, String>> = listOf(
-            Triple(Screen.HOME, "⌂", "Home"),
-            Triple(Screen.NEARBY, "◎", "Nearby"),
-            Triple(Screen.CHATS, "▤", "Chats"),
-            Triple(Screen.VAULT, "▣", "Vault"),
-            Triple(null, "₿", "Wallet"),
-            Triple(Screen.SETTINGS, "⚙", "Settings")
+        val items: List<Triple<Screen?, Int, String>> = listOf(
+            Triple(Screen.HOME, R.drawable.ic_nav_home, "Home"),
+            Triple(Screen.NEARBY, R.drawable.ic_nav_nearby, "Nearby"),
+            Triple(Screen.CHATS, R.drawable.ic_nav_chats, "Chats"),
+            Triple(Screen.VAULT, R.drawable.ic_nav_vault, "Vault"),
+            Triple(null, R.drawable.ic_nav_bitcoin, "Wallet"),
+            Triple(Screen.SETTINGS, R.drawable.ic_nav_settings, "Settings")
         )
         items.forEach { (screen, icon, title) ->
             val selected = screen != null && (
@@ -2406,15 +2711,46 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            item.addView(TextView(this).apply {
-                text = icon
-                textSize = 21f
+            item.minimumHeight = dp(64)
+            item.contentDescription = "$title tab"
+            item.isSelected = selected
+            item.isActivated = selected
+            item.addView(ImageView(this).apply {
+                setImageResource(icon)
+                setColorFilter(if (selected) blue else 0xFF8A94A6.toInt())
+                contentDescription = null
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }, LinearLayout.LayoutParams(dp(24), dp(24)))
+            item.addView(label(title, 11f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply {
                 gravity = Gravity.CENTER
-                setTextColor(if (selected) blue else 0xFF8A94A6.toInt())
-            }, LinearLayout.LayoutParams(-1, dp(28)))
-            item.addView(label(title, 10f, if (selected) blue else 0xFF8A94A6.toInt(), selected).apply { gravity = Gravity.CENTER })
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
             navBar.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
         }
+    }
+
+    private fun addPermissionsNeededCard(parent: LinearLayout) {
+        if (!permissionsPermanentlyDenied) return
+        val notice = card().apply {
+            addView(label("Permissions needed", 14f, ink, true))
+            addView(label("Nearby discovery is limited because an Android permission was denied permanently. You can continue using transports that are already allowed.", 12f, muted).apply {
+                setPadding(0, dp(5), 0, dp(10))
+                setLineSpacing(dp(2).toFloat(), 1f)
+            })
+            addView(secondaryButton("Open app settings") {
+                try {
+                    startActivity(Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    ))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "Could not open app settings.", Toast.LENGTH_LONG).show()
+                }
+            })
+        }
+        parent.addView(notice)
+        parent.addView(vSpace(10))
     }
 
     private var pendingForceRescan = false
@@ -2434,7 +2770,16 @@ class MainActivity : Activity() {
 
         val missing = needed.distinct().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), permissionRequestCode)
+            AlertDialog.Builder(this)
+                .setTitle("Allow nearby discovery")
+                .setMessage(
+                    "Bluetooth permission lets Morta Mesh find and connect to nearby phones. Nearby Wi-Fi permission enables Wi-Fi Direct links for faster media transfer. On older Android versions, the system may require Location permission or Location services for discovery. Morta Mesh does not collect or upload your GPS location. Messages and private media still use the app's peer-to-peer encrypted flows."
+                )
+                .setNegativeButton("Not now", null)
+                .setPositiveButton("Continue") { _, _ ->
+                    requestPermissions(missing.toTypedArray(), permissionRequestCode)
+                }
+                .show()
             return
         }
         startAvailableTransports(forceRescan)
@@ -2477,8 +2822,19 @@ class MainActivity : Activity() {
         if (requestCode == permissionRequestCode) {
             // Start whichever transport the user allowed; one denied permission should not disable the other transport.
             startAvailableTransports(pendingForceRescan)
-            if (grantResults.isEmpty() || grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
+            wifiAutoTick()
+            val denied = permissions.indices.filter { index ->
+                grantResults.getOrNull(index) != PackageManager.PERMISSION_GRANTED
+            }
+            permissionsPermanentlyDenied = denied.any { index ->
+                !shouldShowRequestPermissionRationale(permissions[index])
+            }
+            preferences.edit()
+                .putBoolean("nearby_permissions_permanently_denied", permissionsPermanentlyDenied)
+                .apply()
+            if (denied.isNotEmpty()) {
                 Toast.makeText(this, "You can still use whichever nearby transport has its permissions enabled.", Toast.LENGTH_LONG).show()
+                if (currentScreen == Screen.HOME || currentScreen == Screen.NEARBY) render()
             }
         }
     }
@@ -2542,6 +2898,245 @@ class MainActivity : Activity() {
 
     private fun normalizeWifiAddress(address: String): String = address.trim().uppercase(Locale.ROOT)
     private fun wifiChatId(address: String): String = WIFI_PREFIX + normalizeWifiAddress(address)
+
+    // ---- Automatic Wi-Fi Direct (no taps) -------------------------------------------------------
+    // A queued video creates a short-lived Wi-Fi Direct group with random credentials. The offer is
+    // sent over the existing authenticated, encrypted Bluetooth link; the recipient joins directly.
+    // Both phones must keep Morta Mesh open because the Wi-Fi receiver is lifecycle-bound.
+    @Volatile private var uiVisible = false
+    private var autoStartAttempted = false
+    private var lastWifiAutoDiscoveryAt = 0L
+    private var lastWifiOfferAt = 0L
+    private var lastWifiJoinAt = 0L
+    private var weCreatedWifiGroupAt = 0L
+    private var activeOfferFrame: String? = null
+    private var activeOfferRecipient: String? = null
+    private var activeOfferExpiry = 0L
+
+    private fun isWifiRadioOn(): Boolean =
+        (applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)?.isWifiEnabled == true
+
+    /** Android 9–12 may require Location services to be enabled for Wi-Fi Direct discovery. */
+    private fun wifiLocationServicesEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT !in 28..32) return true
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        return locationManager?.isLocationEnabled != false
+    }
+
+    /** First launch: request Bluetooth and Nearby Wi-Fi permissions, then start available transports. */
+    private fun autoStartTransportsOnce() {
+        if (autoStartAttempted) return
+        autoStartAttempted = true
+        ensureBluetoothPermissionsAndStart()
+    }
+
+    private fun randomAlnum(length: Int): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+        val random = java.security.SecureRandom()
+        return buildString { repeat(length) { append(alphabet[random.nextInt(alphabet.length)]) } }
+    }
+
+    private fun promptEnableWifi() {
+        Toast.makeText(this, "Turn on Wi-Fi so your video can send over Wi-Fi Direct.", Toast.LENGTH_LONG).show()
+        try {
+            startActivity(Intent(
+                if (Build.VERSION.SDK_INT >= 29) android.provider.Settings.Panel.ACTION_WIFI
+                else android.provider.Settings.ACTION_WIFI_SETTINGS
+            ))
+        } catch (_: Exception) { }
+    }
+
+    /** Called after a video is saved to the encrypted queue. */
+    private fun prepareWifiForVideo() {
+        if (!hasWifiDirectRuntimePermission()) { ensureBluetoothPermissionsAndStart(); return }
+        if (!isWifiRadioOn()) { promptEnableWifi(); return }
+        if (!wifiLocationServicesEnabled()) {
+            Toast.makeText(
+                this,
+                "Enable Location services for Wi-Fi Direct discovery on this Android version. Morta Mesh does not collect your GPS location; Bluetooth remains available.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        startWifiDiscoverySilently()
+        mainHandler.postDelayed({ wifiAutoTick() }, 1500)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiDiscoverySilently() {
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) return
+        val now = System.currentTimeMillis()
+        if (now - lastWifiAutoDiscoveryAt < 10_000L) return
+        lastWifiAutoDiscoveryAt = now
+        try {
+            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { wifiDiscovering = true }
+                override fun onFailure(reason: Int) { wifiDiscovering = false }
+            })
+        } catch (_: Exception) { }
+    }
+
+    private fun pendingVideoTransfers(): List<PrivateVault.Item> = try {
+        privateVault.pendingTransfers().filter { it.mimeType.startsWith("video/") && it.recipientId != null }
+    } catch (_: Exception) { emptyList() }
+
+    /** Runs on resume and the mesh timer; work is gated by lifecycle, permission and radio state. */
+    private fun wifiAutoTick() {
+        if (!::privateVault.isInitialized || isFinishing || isDestroyed || !uiVisible) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        val locationReady = wifiLocationServicesEnabled()
+        val now = System.currentTimeMillis()
+        if (locationReady && !wifiDiscovering) startWifiDiscoverySilently()
+
+        val pending = pendingVideoTransfers()
+        if (weCreatedWifiGroupAt != 0L) {
+            // A group that never forms is stale. Remove it instead of leaving Wi-Fi Direct busy.
+            if (!wifiGroupFormed && now - weCreatedWifiGroupAt > 30_000L) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+                return
+            }
+            // Once this recipient has no queued video left, release the group so the next
+            // recipient in the encrypted vault queue can receive its own short-lived group.
+            val activeRecipientStillQueued = activeOfferRecipient?.let { recipient ->
+                pending.any { it.recipientId == recipient }
+            } == true
+            if (activeMediaTransfers.isEmpty() && !activeRecipientStillQueued) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+            }
+        }
+
+        if (!locationReady) return
+        if (pending.isNotEmpty()) {
+            offerWifiLinkForQueuedVideo(pending)
+        } else if (weCreatedWifiGroupAt != 0L && activeMediaTransfers.isEmpty()) {
+            releaseAutoWifiGroup()
+        }
+    }
+
+    private fun releaseAutoWifiGroup() {
+        weCreatedWifiGroupAt = 0L
+        activeOfferFrame = null
+        activeOfferRecipient = null
+        activeOfferExpiry = 0L
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun offerWifiLinkForQueuedVideo(pending: List<PrivateVault.Item>) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val now = System.currentTimeMillis()
+        if (weCreatedWifiGroupAt != 0L) {
+            val recipient = activeOfferRecipient
+            val recipientStillQueued = recipient != null && pending.any { it.recipientId == recipient }
+
+            // Expired offers are removed and retried with fresh credentials; do not strand the queue.
+            if (now >= activeOfferExpiry && activeMediaTransfers.isEmpty()) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+                return
+            }
+            // The active recipient may have completed while other recipients are still queued.
+            if (!recipientStillQueued && activeMediaTransfers.isEmpty()) {
+                releaseAutoWifiGroup()
+                lastWifiOfferAt = now
+                return
+            }
+            if (wifiSockets.isEmpty()) {
+                val frame = activeOfferFrame
+                if (frame != null && recipient != null && now < activeOfferExpiry && now - lastWifiOfferAt >= 20_000L) {
+                    val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+                    lastWifiOfferAt = now
+                    Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+                }
+            }
+            return
+        }
+        if (wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        if (now - lastWifiOfferAt < 25_000L) return
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        val item = pending.firstOrNull { candidate ->
+            !activeMediaTransfers.contains(candidate.id) &&
+                candidate.recipientId?.let { chooseMediaTransport(it, "image/jpeg") } != null
+        } ?: return
+        val recipient = item.recipientId ?: return
+        val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+        lastWifiOfferAt = now
+        val ssid = "DIRECT-mm-" + randomAlnum(4)
+        val passphrase = randomAlnum(16)
+        val config = try {
+            WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+        } catch (_: Exception) { return }
+        manager.createGroup(channel, config, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                val created = System.currentTimeMillis()
+                weCreatedWifiGroupAt = created
+                activeOfferExpiry = created + 120_000L
+                val frame = "${MEDIA_WIRE_PREFIX}W|${encodeWire(ssid)}|${encodeWire(passphrase)}|$activeOfferExpiry|${encodeWire(wifiLocalAddress)}"
+                activeOfferFrame = frame
+                activeOfferRecipient = recipient
+                Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+            }
+            override fun onFailure(reason: Int) {
+                // BUSY commonly indicates a stale group; clear it so a later tick can retry.
+                if (reason == WifiP2pManager.BUSY) {
+                    try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+                }
+            }
+        })
+    }
+
+    /** Offer is accepted only from the authenticated peer on its direct Bluetooth link. */
+    @SuppressLint("MissingPermission")
+    private fun handleWifiLinkOffer(peerId: String, parts: List<String>, fromNodeId: String?) {
+        if (Build.VERSION.SDK_INT < 29 || fromNodeId == null || parts.size < 6) return
+        if (!uiVisible || wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        val now = System.currentTimeMillis()
+        if (now - lastWifiJoinAt < 15_000L) return
+        val ssid = decodeWire(parts[2])
+        val passphrase = decodeWire(parts[3])
+        val expiry = parts[4].toLongOrNull() ?: return
+        val fallbackAddress = decodeWire(parts[5])
+        if (now > expiry || expiry - now > 180_000L) return
+        if (!Regex("DIRECT-[A-Za-z0-9]{2}-[A-Za-z0-9]{1,32}").matches(ssid)) return
+        if (passphrase.length !in 8..63 || !passphrase.all { it.isLetterOrDigit() }) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn() || !wifiLocationServicesEnabled()) {
+            runOnUiThread {
+                when {
+                    !hasWifiDirectRuntimePermission() -> ensureBluetoothPermissionsAndStart()
+                    !isWifiRadioOn() -> promptEnableWifi()
+                    else -> Toast.makeText(
+                        this,
+                        "Enable Location services for Wi-Fi Direct on this Android version. Morta Mesh does not collect your GPS location.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            return
+        }
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        lastWifiJoinAt = now
+        runOnUiThread {
+            Toast.makeText(this, "Joining ${nameFor(peerId)} over Wi-Fi Direct to receive a video…", Toast.LENGTH_SHORT).show()
+            try {
+                val config = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+                manager.connect(channel, config, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() { }
+                    override fun onFailure(reason: Int) {
+                        // Older/vendor builds may reject credential-based joining; use the address invitation.
+                        if (fallbackAddress.isNotBlank()) connectWifiToPeer(fallbackAddress, wifiChatId(fallbackAddress))
+                    }
+                })
+            } catch (_: Exception) { }
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private fun startWifiDirectDiscovery(forceRescan: Boolean = false): Boolean {
@@ -2620,7 +3215,13 @@ class MainActivity : Activity() {
             when (intent?.action) {
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     wifiP2pEnabled = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, WifiP2pManager.WIFI_P2P_STATE_DISABLED) == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                    if (wifiP2pEnabled) requestWifiPeers()
+                    if (wifiP2pEnabled) { requestWifiPeers(); wifiAutoTick() }
+                }
+                WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION -> {
+                    // Android stops discovery after about two minutes; restart it quietly while the app is open.
+                    val state = intent.getIntExtra(WifiP2pManager.EXTRA_DISCOVERY_STATE, WifiP2pManager.WIFI_P2P_DISCOVERY_STOPPED)
+                    wifiDiscovering = state == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED
+                    if (!wifiDiscovering) mainHandler.postDelayed({ wifiAutoTick() }, 1500)
                 }
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestWifiPeers()
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
@@ -2819,7 +3420,10 @@ class MainActivity : Activity() {
                         }
                         when (meshSecurity.acceptIdentity(identity)) {
                             MeshSecurity.IdentityResult.ACCEPTED -> Unit
-                            MeshSecurity.IdentityResult.KEY_CHANGED -> throw java.io.IOException("Wi-Fi peer identity key changed")
+                            MeshSecurity.IdentityResult.KEY_CHANGED -> {
+                                recordKeyChanged(identity.optString("node"))
+                                throw java.io.IOException("Wi-Fi peer identity key changed")
+                            }
                             MeshSecurity.IdentityResult.INVALID -> throw java.io.IOException("Wi-Fi peer identity could not be pinned")
                         }
                         val peerId = resolvedPeerId ?: throw java.io.IOException("Authenticated Wi-Fi peer has no transport ID")
@@ -3594,7 +4198,10 @@ class MainActivity : Activity() {
                 mainHandler.post {
                     when (result) {
                         MeshSecurity.IdentityResult.ACCEPTED -> applyIdentityAdvertisement(sourcePeerId, ttl, advertId, hops, record)
-                        MeshSecurity.IdentityResult.KEY_CHANGED -> Toast.makeText(this, "Blocked a peer whose identity key changed. Verify this contact out of band.", Toast.LENGTH_LONG).show()
+                        MeshSecurity.IdentityResult.KEY_CHANGED -> {
+                            recordKeyChanged(record.optString("node"))
+                            Toast.makeText(this, "Blocked a peer whose identity key changed. Verify this contact out of band.", Toast.LENGTH_LONG).show()
+                        }
                         MeshSecurity.IdentityResult.INVALID -> Unit
                     }
                 }
@@ -4017,7 +4624,16 @@ class MainActivity : Activity() {
             for (i in 0 until array.length()) {
                 val o = array.getJSONObject(i)
                 val id = o.getString("peer")
-                val item = ChatMessage(o.getString("text"), o.getBoolean("mine"), o.optLong("time", System.currentTimeMillis()))
+                val item = ChatMessage(
+                    text = o.getString("text"),
+                    mine = o.getBoolean("mine"),
+                    timestamp = o.optLong("time", System.currentTimeMillis()),
+                    mediaMimeType = o.optString("mediaMimeType").takeIf { it.isNotBlank() },
+                    mediaSize = o.optLong("mediaSize", 0L),
+                    deliveryState = o.optString("deliveryState").takeIf { it.isNotBlank() },
+                    requiredTransport = o.optString("requiredTransport").takeIf { it.isNotBlank() },
+                    transferId = o.optString("transferId").takeIf { it.isNotBlank() }
+                )
                 chatHistory.getOrPut(id) { mutableListOf() }.add(item)
             }
             if (encryptedHistory == null && legacyHistory != null) {
@@ -4046,7 +4662,18 @@ class MainActivity : Activity() {
         if (chatHistoryStorageLocked) return
         val array = JSONArray()
         chatHistory.forEach { (peer, messages) -> messages.takeLast(250).forEach { msg ->
-            array.put(JSONObject().put("peer", peer).put("text", msg.text).put("mine", msg.mine).put("time", msg.timestamp))
+            array.put(
+                JSONObject()
+                    .put("peer", peer)
+                    .put("text", msg.text)
+                    .put("mine", msg.mine)
+                    .put("time", msg.timestamp)
+                    .put("mediaMimeType", msg.mediaMimeType ?: "")
+                    .put("mediaSize", msg.mediaSize)
+                    .put("deliveryState", msg.deliveryState ?: "")
+                    .put("requiredTransport", msg.requiredTransport ?: "")
+                    .put("transferId", msg.transferId ?: "")
+            )
         } }
         if (encryptedChatStore.writeText(array.toString())) {
             // Remove the old plaintext SharedPreferences copy after the encrypted file is committed.
