@@ -249,6 +249,7 @@ class MainActivity : UiKitActivity() {
                 if (expired) renderIfBrowseScreen()
                 gossipLocalIdentity()
                 mediaReceiveExecutor.execute { reapExpiredIncomingMedia() }
+                wifiAutoTick()
             } catch (_: Exception) {
                 // One radio error must not stop future route refreshes.
             } finally {
@@ -367,10 +368,12 @@ class MainActivity : UiKitActivity() {
 
     override fun onStart() {
         super.onStart()
+        uiVisible = true
         if (!wifiReceiverRegistered) {
             val filter = IntentFilter().apply {
                 addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
             }
@@ -397,9 +400,12 @@ class MainActivity : UiKitActivity() {
         }
         if (currentScreen == Screen.VAULT) render() else refreshNav()
         retryQueuedMedia()
+        autoStartTransportsOnce()
+        wifiAutoTick()
     }
 
     override fun onStop() {
+        uiVisible = false
         vaultUnlocked = false
         openingVaultPreview = false
         try { privateMediaDialog?.dismiss() } catch (_: Exception) { }
@@ -1669,6 +1675,7 @@ class MainActivity : UiKitActivity() {
                 val target = chooseMediaTransport(recipient, preparedMime)
                 if (target == null) {
                     runOnUiThread {
+                        if (isVideo) prepareWifiForVideo()
                         Toast.makeText(
                             this,
                             "${if (isVideo) "Video needs Wi-Fi Direct" else "Photo uses Bluetooth"}; the encrypted item is queued for $peerName. It will send when that recipient is directly connected on that link type (media is never relayed).",
@@ -2027,13 +2034,17 @@ class MainActivity : UiKitActivity() {
         reapExpiredIncomingMedia()
         val parts = text.split("|")
         if (parts.size < 3) return true
-        if (parts[1] == "S" || parts[1] == "C" || parts[1] == "E") {
+        if (parts[1] == "S" || parts[1] == "C" || parts[1] == "E" || parts[1] == "W") {
             // Media must arrive over a direct physical link from its authenticated sender.
             val direct = sourceTransportId != null && fromNodeId != null &&
                 synchronized(physicalNodeByTransport) { physicalNodeByTransport[sourceTransportId] == fromNodeId }
             if (!direct) return true
         }
         when (parts[1]) {
+            "W" -> {
+                handleWifiLinkOffer(peerId, parts, fromNodeId)
+                return true
+            }
             "S" -> {
                 if (parts.size < 6) return true
                 val transferId = parts[2]
@@ -2801,6 +2812,7 @@ class MainActivity : UiKitActivity() {
         if (requestCode == permissionRequestCode) {
             // Start whichever transport the user allowed; one denied permission should not disable the other transport.
             startAvailableTransports(pendingForceRescan)
+            wifiAutoTick()
             val denied = permissions.indices.filter { index ->
                 grantResults.getOrNull(index) != PackageManager.PERMISSION_GRANTED
             }
@@ -2876,6 +2888,188 @@ class MainActivity : UiKitActivity() {
 
     private fun normalizeWifiAddress(address: String): String = address.trim().uppercase(Locale.ROOT)
     private fun wifiChatId(address: String): String = WIFI_PREFIX + normalizeWifiAddress(address)
+
+    // ---- Automatic Wi-Fi Direct (no taps) -------------------------------------------------------
+    // A queued video creates a short-lived Wi-Fi Direct group with random credentials. The offer is
+    // sent over the existing authenticated, encrypted Bluetooth link; the recipient joins directly.
+    // Both phones must keep Morta Mesh open because the Wi-Fi receiver is lifecycle-bound.
+    @Volatile private var uiVisible = false
+    private var autoStartAttempted = false
+    private var lastWifiAutoDiscoveryAt = 0L
+    private var lastWifiOfferAt = 0L
+    private var lastWifiJoinAt = 0L
+    private var weCreatedWifiGroupAt = 0L
+    private var activeOfferFrame: String? = null
+    private var activeOfferRecipient: String? = null
+    private var activeOfferExpiry = 0L
+
+    private fun isWifiRadioOn(): Boolean =
+        (applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)?.isWifiEnabled == true
+
+    /** First launch: request Bluetooth and Nearby Wi-Fi permissions, then start available transports. */
+    private fun autoStartTransportsOnce() {
+        if (autoStartAttempted) return
+        autoStartAttempted = true
+        ensureBluetoothPermissionsAndStart()
+    }
+
+    private fun randomAlnum(length: Int): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+        val random = java.security.SecureRandom()
+        return buildString { repeat(length) { append(alphabet[random.nextInt(alphabet.length)]) } }
+    }
+
+    private fun promptEnableWifi() {
+        Toast.makeText(this, "Turn on Wi-Fi so your video can send over Wi-Fi Direct.", Toast.LENGTH_LONG).show()
+        try {
+            startActivity(Intent(
+                if (Build.VERSION.SDK_INT >= 29) android.provider.Settings.Panel.ACTION_WIFI
+                else android.provider.Settings.ACTION_WIFI_SETTINGS
+            ))
+        } catch (_: Exception) { }
+    }
+
+    /** Called after a video is saved to the encrypted queue. */
+    private fun prepareWifiForVideo() {
+        if (!hasWifiDirectRuntimePermission()) { ensureBluetoothPermissionsAndStart(); return }
+        if (!isWifiRadioOn()) { promptEnableWifi(); return }
+        startWifiDiscoverySilently()
+        mainHandler.postDelayed({ wifiAutoTick() }, 1500)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startWifiDiscoverySilently() {
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        val now = System.currentTimeMillis()
+        if (now - lastWifiAutoDiscoveryAt < 10_000L) return
+        lastWifiAutoDiscoveryAt = now
+        try {
+            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { wifiDiscovering = true }
+                override fun onFailure(reason: Int) { wifiDiscovering = false }
+            })
+        } catch (_: Exception) { }
+    }
+
+    private fun pendingVideoTransfers(): List<PrivateVault.Item> = try {
+        privateVault.pendingTransfers().filter { it.mimeType.startsWith("video/") && it.recipientId != null }
+    } catch (_: Exception) { emptyList() }
+
+    /** Runs on resume and the mesh timer; work is gated by lifecycle, permission and radio state. */
+    private fun wifiAutoTick() {
+        if (!::privateVault.isInitialized || isFinishing || isDestroyed || !uiVisible) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) return
+        val now = System.currentTimeMillis()
+        if (!wifiDiscovering) startWifiDiscoverySilently()
+        if (!wifiGroupFormed && weCreatedWifiGroupAt != 0L && now - weCreatedWifiGroupAt > 10_000L) {
+            weCreatedWifiGroupAt = 0L
+            activeOfferFrame = null
+        }
+        val pending = pendingVideoTransfers()
+        if (pending.isNotEmpty()) {
+            offerWifiLinkForQueuedVideo(pending)
+        } else if (weCreatedWifiGroupAt != 0L && activeMediaTransfers.isEmpty() && now - weCreatedWifiGroupAt > 120_000L) {
+            releaseAutoWifiGroup()
+        }
+    }
+
+    private fun releaseAutoWifiGroup() {
+        weCreatedWifiGroupAt = 0L
+        activeOfferFrame = null
+        activeOfferRecipient = null
+        activeOfferExpiry = 0L
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun offerWifiLinkForQueuedVideo(pending: List<PrivateVault.Item>) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val now = System.currentTimeMillis()
+        if (weCreatedWifiGroupAt != 0L && wifiSockets.isEmpty()) {
+            // Repeat the same offer while the group is valid and the recipient has not joined.
+            val frame = activeOfferFrame
+            val recipient = activeOfferRecipient
+            if (frame != null && recipient != null && now < activeOfferExpiry && now - lastWifiOfferAt >= 20_000L) {
+                val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+                lastWifiOfferAt = now
+                Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+            }
+            return
+        }
+        if (wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        if (now - lastWifiOfferAt < 25_000L) return
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        val item = pending.firstOrNull { candidate ->
+            !activeMediaTransfers.contains(candidate.id) &&
+                candidate.recipientId?.let { chooseMediaTransport(it, "image/jpeg") } != null
+        } ?: return
+        val recipient = item.recipientId ?: return
+        val bleLink = chooseMediaTransport(recipient, "image/jpeg") ?: return
+        lastWifiOfferAt = now
+        val ssid = "DIRECT-mm-" + randomAlnum(4)
+        val passphrase = randomAlnum(16)
+        val config = try {
+            WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+        } catch (_: Exception) { return }
+        manager.createGroup(channel, config, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                val created = System.currentTimeMillis()
+                weCreatedWifiGroupAt = created
+                activeOfferExpiry = created + 120_000L
+                val frame = "${MEDIA_WIRE_PREFIX}W|${encodeWire(ssid)}|${encodeWire(passphrase)}|$activeOfferExpiry|${encodeWire(wifiLocalAddress)}"
+                activeOfferFrame = frame
+                activeOfferRecipient = recipient
+                Thread { sendMediaWireText(recipient, bleLink, frame) }.start()
+            }
+            override fun onFailure(reason: Int) {
+                // BUSY commonly indicates a stale group; clear it so a later tick can retry.
+                if (reason == WifiP2pManager.BUSY) {
+                    try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+                }
+            }
+        })
+    }
+
+    /** Offer is accepted only from the authenticated peer on its direct Bluetooth link. */
+    @SuppressLint("MissingPermission")
+    private fun handleWifiLinkOffer(peerId: String, parts: List<String>, fromNodeId: String?) {
+        if (Build.VERSION.SDK_INT < 29 || fromNodeId == null || parts.size < 6) return
+        if (!uiVisible || wifiGroupFormed || wifiSockets.isNotEmpty() || wifiConnectingChatId != null) return
+        val now = System.currentTimeMillis()
+        if (now - lastWifiJoinAt < 15_000L) return
+        val ssid = decodeWire(parts[2])
+        val passphrase = decodeWire(parts[3])
+        val expiry = parts[4].toLongOrNull() ?: return
+        val fallbackAddress = decodeWire(parts[5])
+        if (now > expiry || expiry - now > 180_000L) return
+        if (!Regex("DIRECT-[A-Za-z0-9]{2}-[A-Za-z0-9]{1,32}").matches(ssid)) return
+        if (passphrase.length !in 8..63 || !passphrase.all { it.isLetterOrDigit() }) return
+        if (!hasWifiDirectRuntimePermission() || !isWifiRadioOn()) {
+            runOnUiThread { if (!hasWifiDirectRuntimePermission()) ensureBluetoothPermissionsAndStart() else promptEnableWifi() }
+            return
+        }
+        val manager = wifiP2pManager ?: return
+        val channel = wifiP2pChannel ?: return
+        lastWifiJoinAt = now
+        runOnUiThread {
+            Toast.makeText(this, "Joining ${nameFor(peerId)} over Wi-Fi Direct to receive a video…", Toast.LENGTH_SHORT).show()
+            try {
+                val config = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(passphrase).enablePersistentMode(false).build()
+                manager.connect(channel, config, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() { }
+                    override fun onFailure(reason: Int) {
+                        // Older/vendor builds may reject credential-based joining; use the address invitation.
+                        if (fallbackAddress.isNotBlank()) connectWifiToPeer(fallbackAddress, wifiChatId(fallbackAddress))
+                    }
+                })
+            } catch (_: Exception) { }
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private fun startWifiDirectDiscovery(forceRescan: Boolean = false): Boolean {
@@ -2954,7 +3148,13 @@ class MainActivity : UiKitActivity() {
             when (intent?.action) {
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     wifiP2pEnabled = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, WifiP2pManager.WIFI_P2P_STATE_DISABLED) == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                    if (wifiP2pEnabled) requestWifiPeers()
+                    if (wifiP2pEnabled) { requestWifiPeers(); wifiAutoTick() }
+                }
+                WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION -> {
+                    // Android stops discovery after about two minutes; restart it quietly while the app is open.
+                    val state = intent.getIntExtra(WifiP2pManager.EXTRA_DISCOVERY_STATE, WifiP2pManager.WIFI_P2P_DISCOVERY_STOPPED)
+                    wifiDiscovering = state == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED
+                    if (!wifiDiscovering) mainHandler.postDelayed({ wifiAutoTick() }, 1500)
                 }
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestWifiPeers()
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
