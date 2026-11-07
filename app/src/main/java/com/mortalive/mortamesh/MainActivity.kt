@@ -2650,7 +2650,9 @@ class MainActivity : UiKitActivity() {
             Toast.makeText(this, "Message is too long. Keep it under 3 KB.", Toast.LENGTH_SHORT).show()
             return
         }
-        val useWifiChatTransport = peerId.startsWith(WIFI_NODE_PREFIX) && wifiWriters.containsKey(peerId)
+        // A Wi-Fi chat remains pinned to Wi-Fi. If its socket drops, do not silently route the
+        // message over BLE; the sender keeps the draft and must reconnect/accept a new Wi-Fi session.
+        val useWifiChatTransport = peerId.startsWith(WIFI_NODE_PREFIX)
         if (!sendSecurePayload(
                 peerId,
                 text,
@@ -4221,6 +4223,12 @@ class MainActivity : UiKitActivity() {
     private fun sendWifiText(peerId: String, text: String) {
         val writer = wifiWriters[peerId]
         if (writer == null) {
+            if (peerId.startsWith(WIFI_NODE_PREFIX)) {
+                runOnUiThread {
+                    Toast.makeText(this, "Wi-Fi Direct is disconnected. Reconnect with a new accepted Wi-Fi chat request; this message was not sent over Bluetooth.", Toast.LENGTH_LONG).show()
+                }
+                return
+            }
             pendingWifiMessages.getOrPut(peerId) { ArrayDeque() }.addLast(text)
             val address = wifiConnectAddresses[peerId] ?: peerId.removePrefix(WIFI_PREFIX)
             if (wifiConnectingChatId != peerId && !wifiSocketClientConnecting && !wifiSockets.containsKey(peerId)) connectWifiToPeer(address, peerId)
