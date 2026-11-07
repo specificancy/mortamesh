@@ -37,6 +37,7 @@ import androidx.exifinterface.media.ExifInterface
 import android.net.Uri
 import android.text.InputType
 import android.util.Base64
+import android.util.Log
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
@@ -268,6 +269,8 @@ class MainActivity : UiKitActivity() {
     private var wifiChatGroupPeerNodeId: String? = null
     private val wifiSockets = linkedMapOf<String, Socket>()
     private val wifiWriters = linkedMapOf<String, BufferedWriter>()
+    // A broken socket may be hit by several startup sync frames. Notify once per connection.
+    private val wifiWriteFailureNotified = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingWifiMessages = linkedMapOf<String, ArrayDeque<String>>()
     private val wifiConnectAddresses = linkedMapOf<String, String>()
     private val wifiPort = 42892
@@ -4120,19 +4123,40 @@ class MainActivity : UiKitActivity() {
                             authenticated = true
                             socket.soTimeout = 0
                             val ready = CountDownLatch(1)
+                            // Registration must complete before this reader consumes application frames,
+                            // but it must not wait for inbox rendering or startup sync. In the old flow the
+                            // five-second latch covered all UI work; a busy main thread could time out,
+                            // close a healthy socket, and then run the queued registration against that
+                            // already-closed socket.
+                            val registrationLock = Any()
+                            var registrationCancelled = false
+                            var registrationAccepted = false
                             mainHandler.post {
+                                var registered = false
                                 try {
-                                    wifiSockets[peerId] = socket
-                                    wifiWriters[peerId] = socketWriter
-                                    wifiP2pConnectRequestPending = false
-                                    clearWifiConnectTimeout()
-                                    wifiSocketClientConnecting = false
-                                    if (wifiConnectingChatId == peerId) wifiConnectingChatId = null
-                                    peerNames[peerId] = remoteName
-                                    if (remoteAddress.isNotBlank()) wifiConnectAddresses[peerId] = normalizeWifiAddress(remoteAddress)
-                                    synchronized(physicalNodeByTransport) { physicalNodeByTransport[peerId] = nodeId }
-                                    identityRecords[nodeId] = JSONObject(identity.toString())
-                                    persistPeerNames()
+                                    synchronized(registrationLock) {
+                                        if (!registrationCancelled && !socket.isClosed && socket.isConnected) {
+                                            wifiSockets[peerId] = socket
+                                            wifiWriters[peerId] = socketWriter
+                                            wifiP2pConnectRequestPending = false
+                                            clearWifiConnectTimeout()
+                                            wifiSocketClientConnecting = false
+                                            if (wifiConnectingChatId == peerId) wifiConnectingChatId = null
+                                            peerNames[peerId] = remoteName
+                                            if (remoteAddress.isNotBlank()) wifiConnectAddresses[peerId] = normalizeWifiAddress(remoteAddress)
+                                            synchronized(physicalNodeByTransport) { physicalNodeByTransport[peerId] = nodeId }
+                                            identityRecords[nodeId] = JSONObject(identity.toString())
+                                            wifiWriteFailureNotified.remove(peerId)
+                                            persistPeerNames()
+                                            registrationAccepted = true
+                                            registered = true
+                                            // Wake the socket reader immediately after the transport maps
+                                            // are valid, before network sync and UI rendering.
+                                            ready.countDown()
+                                        }
+                                    }
+                                    if (!registered) return@post
+
                                     flushPendingWifiMessages(peerId)
                                     onTransportReady(peerId)
                                     applyIdentityAdvertisement(peerId, MESH_ROUTE_TTL, UUID.randomUUID().toString(), 0, identity)
@@ -4155,7 +4179,13 @@ class MainActivity : UiKitActivity() {
                                     ready.countDown()
                                 }
                             }
-                            if (!ready.await(5, TimeUnit.SECONDS)) throw java.io.IOException("Wi-Fi authentication registration timed out")
+                            if (!ready.await(15, TimeUnit.SECONDS)) {
+                                synchronized(registrationLock) { registrationCancelled = true }
+                                throw java.io.IOException("Wi-Fi authentication registration timed out")
+                            }
+                            if (!registrationAccepted) {
+                                throw java.io.IOException("Wi-Fi socket registration was cancelled")
+                            }
                         }
                     }
                     "message" -> {
@@ -4169,8 +4199,9 @@ class MainActivity : UiKitActivity() {
                     }
                 }
             }
-        } catch (_: Exception) {
-            // A bad or unauthenticated hello is intentionally dropped without adding a peer or route.
+        } catch (e: Exception) {
+            // Keep local diagnostics for device-specific TCP/P2P failures without exposing secrets in UI.
+            Log.w("MortaMesh-WiFi", "Wi-Fi socket handshake/read failed", e)
         } finally {
             val peerId = resolvedPeerId
             runOnUiThread {
@@ -4236,9 +4267,22 @@ class MainActivity : UiKitActivity() {
             return
         }
         try { writeWifiFrame(writer, JSONObject().put("type", "message").put("text", text)) }
-        catch (_: Exception) {
+        catch (e: Exception) {
             pendingWifiMessages.getOrPut(peerId) { ArrayDeque() }.addLast(text)
-            runOnUiThread { Toast.makeText(this, "Wi-Fi Direct link interrupted. Try again or use Bluetooth.", Toast.LENGTH_LONG).show() }
+            Log.w("MortaMesh-WiFi", "Wi-Fi write failed for $peerId", e)
+            if (wifiWriteFailureNotified.add(peerId)) {
+                val failedSocket = wifiSockets[peerId]
+                runOnUiThread {
+                    // Stop using a stale writer immediately. The socket reader's finally block
+                    // performs the normal transport cleanup and updates the chat header.
+                    if (wifiWriters[peerId] === writer) wifiWriters.remove(peerId)
+                    if (failedSocket != null && wifiSockets[peerId] === failedSocket) {
+                        try { failedSocket.close() } catch (_: Exception) { }
+                    }
+                    Toast.makeText(this, "Wi-Fi Direct link interrupted. Try again or use Bluetooth.", Toast.LENGTH_LONG).show()
+                    refreshChatHeaderOrNav()
+                }
+            }
         }
     }
 
