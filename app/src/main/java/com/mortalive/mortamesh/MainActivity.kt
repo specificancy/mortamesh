@@ -213,6 +213,8 @@ class MainActivity : UiKitActivity() {
     private val transportIdentitySentAt = linkedMapOf<String, Long>()
     private val transportWorldSyncSentAt = linkedMapOf<String, Long>()
     private val meshProtocolExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-Protocol").apply { isDaemon = true } }
+    // Never perform Wi-Fi TCP writes on Android's main thread. Preserve UI-originated order.
+    private val wifiWriteExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "MortaMesh-WiFiWrite").apply { isDaemon = true } }
     private var legacyWarningShown = false
 
     private lateinit var bluetoothManager: BluetoothManager
@@ -479,6 +481,7 @@ class MainActivity : UiKitActivity() {
         synchronized(incomingMediaLifecycleLock) { mediaReceiveClosing = true }
         mediaReceiveExecutor.shutdownNow()
         meshProtocolExecutor.shutdownNow()
+        wifiWriteExecutor.shutdownNow()
         anonymousSubmissionExecutor.shutdownNow()
         anonymousRelayExecutor.shutdownNow()
         incomingMedia.values.toList().forEach { try { it.writer.abort() } catch (_: Exception) { } }
@@ -4192,7 +4195,11 @@ class MainActivity : UiKitActivity() {
                         if (!authenticated) throw java.io.IOException("Wi-Fi message arrived before authentication")
                         val peerId = resolvedPeerId ?: throw java.io.IOException("Authenticated Wi-Fi peer has no transport ID")
                         val text = frame.optString("text")
-                        if (text.isNotEmpty()) handleIncomingWireText(peerId, text)
+                        if (text.isNotEmpty()) {
+                            // A processing error in one frame is not a transport failure: keep the socket.
+                            try { handleIncomingWireText(peerId, text) }
+                            catch (e: Exception) { Log.w("MortaMesh-WiFi", "Wi-Fi frame handling failed", e) }
+                        }
                     }
                     else -> {
                         // Unknown frame types are ignored, but never grant transport readiness.
@@ -4242,13 +4249,8 @@ class MainActivity : UiKitActivity() {
 
     private fun flushPendingWifiMessages(peerId: String) {
         val writer = wifiWriters[peerId] ?: return
-        val queue = pendingWifiMessages[peerId] ?: return
-        while (queue.isNotEmpty()) {
-            val text = queue.removeFirst()
-            try { writeWifiFrame(writer, JSONObject().put("type", "message").put("text", text)) }
-            catch (_: Exception) { queue.addFirst(text); break }
-        }
-        if (queue.isEmpty()) pendingWifiMessages.remove(peerId)
+        val queue = pendingWifiMessages.remove(peerId) ?: return
+        queue.forEach { text -> dispatchWifiWrite(peerId, writer, text) }
     }
 
     private fun sendWifiText(peerId: String, text: String) {
@@ -4266,24 +4268,43 @@ class MainActivity : UiKitActivity() {
             runOnUiThread { Toast.makeText(this, "Waiting for the Wi-Fi Direct link…", Toast.LENGTH_SHORT).show() }
             return
         }
-        try { writeWifiFrame(writer, JSONObject().put("type", "message").put("text", text)) }
-        catch (e: Exception) {
-            pendingWifiMessages.getOrPut(peerId) { ArrayDeque() }.addLast(text)
-            Log.w("MortaMesh-WiFi", "Wi-Fi write failed for $peerId", e)
-            if (wifiWriteFailureNotified.add(peerId)) {
-                val failedSocket = wifiSockets[peerId]
-                runOnUiThread {
-                    // Stop using a stale writer immediately. The socket reader's finally block
-                    // performs the normal transport cleanup and updates the chat header.
-                    if (wifiWriters[peerId] === writer) wifiWriters.remove(peerId)
-                    if (failedSocket != null && wifiSockets[peerId] === failedSocket) {
-                        try { failedSocket.close() } catch (_: Exception) { }
-                    }
-                    Toast.makeText(this, "Wi-Fi Direct link interrupted. Try again or use Bluetooth.", Toast.LENGTH_LONG).show()
-                    refreshChatHeaderOrNav()
-                }
+        dispatchWifiWrite(peerId, writer, text)
+    }
+
+    /** UI-thread callers hop to one ordered writer thread; worker threads write inline. */
+    private fun dispatchWifiWrite(peerId: String, writer: BufferedWriter, text: String) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            try { wifiWriteExecutor.execute { writeWifiTextFrame(peerId, writer, text) } }
+            catch (e: Exception) {
+                runOnUiThread { handleWifiWriteFailure(peerId, writer, text, e) }
             }
+        } else {
+            writeWifiTextFrame(peerId, writer, text)
         }
+    }
+
+    private fun writeWifiTextFrame(peerId: String, writer: BufferedWriter, text: String) {
+        try {
+            writeWifiFrame(writer, JSONObject().put("type", "message").put("text", text))
+        } catch (e: Exception) {
+            runOnUiThread { handleWifiWriteFailure(peerId, writer, text, e) }
+        }
+    }
+
+    /** Runs on the UI thread so link state, queues and toast throttling stay consistent. */
+    private fun handleWifiWriteFailure(peerId: String, writer: BufferedWriter, text: String, error: Exception) {
+        // Ignore a late failure from an old socket if a replacement session is already active.
+        if (wifiWriters[peerId] !== writer) return
+        pendingWifiMessages.getOrPut(peerId) { ArrayDeque() }.addLast(text)
+        Log.w("MortaMesh-WiFi", "Wi-Fi write failed for $peerId", error)
+        if (!wifiWriteFailureNotified.add(peerId)) return
+        val failedSocket = wifiSockets[peerId]
+        wifiWriters.remove(peerId)
+        if (failedSocket != null && wifiSockets[peerId] === failedSocket) {
+            try { failedSocket.close() } catch (_: Exception) { }
+        }
+        Toast.makeText(this, "Wi-Fi Direct link interrupted. Try again or use Bluetooth.", Toast.LENGTH_LONG).show()
+        refreshChatHeaderOrNav()
     }
 
     private fun clearWifiConnectTimeout() {
