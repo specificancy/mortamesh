@@ -3106,6 +3106,14 @@ class MainActivity : UiKitActivity() {
             System.currentTimeMillis() + 60_000L
         )
         wifiOutgoingChatRequests[nodeId] = request
+        mainHandler.postDelayed({
+            val current = wifiOutgoingChatRequests[nodeId]
+            if (current?.requestId == request.requestId && current.expiresAt <= System.currentTimeMillis()) {
+                wifiOutgoingChatRequests.remove(nodeId)
+                Toast.makeText(this, "Wi-Fi chat request expired. You can send another request.", Toast.LENGTH_SHORT).show()
+                renderIfBrowseScreen()
+            }
+        }, 60_500L)
         trySendWifiChatRequest(nodeId, request.requestId, bluetoothAddress, System.currentTimeMillis() + 15_000L)
         renderIfBrowseScreen()
     }
@@ -3376,6 +3384,14 @@ class MainActivity : UiKitActivity() {
         wifiChatGroupRequestId = null
         wifiChatGroupPeerNodeId = null
         pendingWifiChatAutoOpenNodeId = null
+        val manager = wifiP2pManager
+        val channel = wifiP2pChannel
+        if (manager != null && channel != null && hasWifiDirectRuntimePermission()) {
+            try { manager.cancelConnect(channel, null) } catch (_: Exception) { }
+            try { manager.removeGroup(channel, null) } catch (_: Exception) { }
+        }
+        wifiGroupFormed = false
+        wifiSocketClientConnecting = false
         sendWifiChatControl(
             peerNodeId,
             JSONObject().put("kind", "wifi_chat_failed").put("requestId", requestId).put("reason", message.take(120)),
@@ -3908,6 +3924,14 @@ class MainActivity : UiKitActivity() {
                 wifiP2pConnectRequestPending = false
                 clearWifiConnectTimeout()
                 wifiConnectingChatId = null
+                wifiSocketClientConnecting = false
+                val disconnectedChatNode = wifiChatGroupPeerNodeId
+                wifiChatGroupRequestId = null
+                wifiChatGroupPeerNodeId = null
+                pendingWifiChatAutoOpenNodeId = null
+                if (disconnectedChatNode != null) {
+                    wifiAcceptedChatRequests.entries.removeAll { it.value == disconnectedChatNode }
+                }
                 // The group-owned TCP service is only valid while this P2P group exists.
                 try { wifiServerSocket?.close() } catch (_: Exception) { }
                 wifiServerSocket = null
@@ -4114,6 +4138,8 @@ class MainActivity : UiKitActivity() {
                                         pendingWifiChatAutoOpenNodeId = null
                                         wifiChatGroupRequestId = null
                                         wifiChatGroupPeerNodeId = null
+                                        wifiAcceptedChatRequests.entries.removeAll { it.value == nodeId }
+                                        wifiOutgoingChatRequests.remove(nodeId)
                                         activeChatId = peerId
                                         currentScreen = Screen.CHAT
                                         render()
@@ -4219,9 +4245,14 @@ class MainActivity : UiKitActivity() {
             if (!wifiP2pConnectRequestPending || wifiSockets.isNotEmpty()) return@Runnable
             if (chatId != null && wifiConnectingChatId != chatId) return@Runnable
 
+            val failedNodeId = wifiChatGroupPeerNodeId
+            val failedRequestId = wifiChatGroupRequestId
             wifiP2pConnectRequestPending = false
             wifiSocketClientConnecting = false
             if (chatId == null || wifiConnectingChatId == chatId) wifiConnectingChatId = null
+            wifiChatGroupRequestId = null
+            wifiChatGroupPeerNodeId = null
+            pendingWifiChatAutoOpenNodeId = null
             val manager = wifiP2pManager
             val channel = wifiP2pChannel
             if (manager != null && channel != null && hasWifiDirectRuntimePermission()) {
@@ -4229,6 +4260,13 @@ class MainActivity : UiKitActivity() {
                 try { manager.removeGroup(channel, null) } catch (_: Exception) { }
             }
             wifiGroupFormed = false
+            if (failedNodeId != null && failedRequestId != null) {
+                sendWifiChatControl(
+                    failedNodeId,
+                    JSONObject().put("kind", "wifi_chat_failed")
+                        .put("requestId", failedRequestId).put("reason", "timeout")
+                )
+            }
             Toast.makeText(
                 this,
                 "Wi-Fi Direct did not finish connecting. The request was cleared; retry from one phone, or continue over Bluetooth.",
@@ -4873,7 +4911,10 @@ class MainActivity : UiKitActivity() {
         anonymousRelayPeerModes.remove(peerId)
         transportIdentitySentAt.remove(peerId)
         transportWorldSyncSentAt.remove(peerId)
-        physicalNodeByTransport.remove(peerId)
+        val lostNodeId = synchronized(physicalNodeByTransport) { physicalNodeByTransport.remove(peerId) }
+        if (lostNodeId != null && !wifiWriters.containsKey(wifiNodeChatId(lostNodeId))) {
+            wifiOutgoingChatRequests.remove(lostNodeId)
+        }
         meshRoutes.entries.removeAll { it.value.nextHop == peerId }
         if (currentScreen == Screen.CHAT) refreshChatHeaderOrNav() else renderIfBrowseScreen()
     }
