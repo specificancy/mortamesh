@@ -21,7 +21,7 @@ This milestone adds an independent wallet surface to Morta Mesh. It does not mod
 
 - Bitcoin mainnet, real BTC, spending, signing and transaction broadcasting. This milestone is Testnet4 receive and sync only.
 - LAMA wallet operations: actual key derivation, 24-word wallet creation/restoration, one-time receive-address allocation, UTXO discovery, balance sync, transaction building/signing/broadcast, header/Merkle verification and NFT ownership remain unavailable. The private Rust repository currently contains lamanode; the separately testable lamacore crate and UniFFI bindings have not been extracted. The node RPC is loopback-only and API-key protected, and the public TLS light-client gateway remains planned.
-- Native NFT minting, transfers, sales and marketplace operations. The uploaded chain transaction/output model does not yet contain the native asset fields and validation described in the v3 decision plan.
+- Native NFT/meme-coin wallet operations: the Rust LAMA repository already contains typed asset payloads, asset-bearing UTXO outputs, conservation checks and offer-sighash rules for testnet/devnet. Android still has no lamacore binding, asset indexer, mobile create/mint/transfer UI or marketplace flow. Mainnet asset activation remains disabled in current params.
 - Mortalive account connection or NFT badge proof. Any future display or proof must be a separate, explicit opt-in and should not reveal a reusable public wallet address by default.
 - Cross-chain BTC/Lama swaps and shielded transfers.
 
