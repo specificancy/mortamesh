@@ -2,7 +2,6 @@ package com.mortalive.mortamesh.lama
 
 import java.math.BigDecimal
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.LinkedHashMap
 
 /** Values pinned to the current LAMA Rust params.rs. Mainnet deliberately stays unavailable in the app. */
