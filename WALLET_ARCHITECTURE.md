@@ -35,6 +35,14 @@ This milestone adds an independent wallet surface to Morta Mesh. It does not mod
 - The recovery phrase is shown once at creation for the user to back up offline. Strings are immutable in the JVM, so the application minimizes their lifetime but cannot guarantee deterministic zeroization of every in-memory copy.
 - This is an experimental Testnet4 foundation, not an audited production wallet. The app intentionally has no send flow.
 
+## LAMA MeshPay and multi-person Wi-Fi status (MP0 / draft)
+
+- The Rust LAMA repository already contains testnet/devnet typed asset transaction and offer validation. The Android app is not yet an operational LAMA wallet.
+- MP0 includes offline network/address/amount pre-checks, metadata-hash verification, a Rust-core interface that fails closed, and a bounded in-memory carry primitive that requires an injected Rust validation result.
+- No payment request/send UI, signed transaction handoff, persistent carry queue, BLE/Wi-Fi relay integration, public gateway or broadcast exists in this Android milestone. A queued or gateway-accepted transaction is not a chain confirmation.
+- Never put node RPC credentials in the APK. The current private node RPC is loopback-only and API-key protected; public light-client infrastructure remains separate work.
+- Wi-Fi multi-person chat queues accepted clients until the host group is formed, requires Bluetooth approval, caps the host at four other clients and rechecks transient group-loss callbacks before closing sockets. The cap and relay behavior still require physical 3–5 phone tests.
+
 ## Follow-up work
 
 1. Freeze and publish final network/genesis identifiers after the planned final genesis re-mine; keep Android network/address test vectors synchronized with Rust params.

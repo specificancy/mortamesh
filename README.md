@@ -7,6 +7,7 @@ The Android manifest includes `INTERNET` permission for the app's **local Wi-Fi 
 ## Implemented networking
 
 - **Wi-Fi Direct:** discovery plus a local TCP transport for direct peers. It is preferred for large media when a direct recipient route is available.
+- **Multi-person Wi-Fi chat (draft):** a host can admit up to four other phones; invitations wait until Android reports the group formed. The client cap is provisional and requires physical-device testing.
 - **Bluetooth LE:** GATT discovery and direct text/media framing.
 - **Mesh identity gossip and relaying:** connected phones exchange signed identity records, periodically refresh the local identity advertisement, age out stale routes, and forward encrypted packets. Route advertisements can improve a route when the same announcement arrives along a shorter path. A packet ID cache suppresses duplicates; packets have a maximum eight-hop TTL and fall back to bounded flooding when a route is missing.
 - **Logical identities:** a stable UUIDv8 node ID is derived from SHA-256 of the install's P-256 public key, binding the logical identity to the signing key separately from ephemeral radio addresses. Relayed peers appear in **Nearby → Reachable through Morta Mesh** and can be opened like a normal chat.
@@ -109,3 +110,8 @@ The Lama Coin section now has a separate Android preparation layer: Testnet is t
 Wallet activity is independent of Mortalive authentication and does not share wallet addresses, keys, balances, holdings or transaction history with Mortalive or anonymous group submissions. Any future NFT display or membership proof must be an explicit, separate opt-in.
 
 See [WALLET_ARCHITECTURE.md](WALLET_ARCHITECTURE.md) for the implemented scope, explicit limitations and follow-up engineering requirements. This is an experimental Testnet4 foundation, not a production wallet.
+
+
+## LAMA MeshPay status (MP0)
+
+MortaMesh contains offline LAMA address/amount/metadata helpers, a fail-closed Rust-core contract and a bounded in-memory carry primitive that requires Rust-core validation. This is scaffolding only: no payment request/send UI, BLE/Wi-Fi payment handoff, persistent carry queue, gateway connection or transaction broadcast is wired in. No LAMA value moves in this build. A locally stored or future gateway-accepted transaction is not a chain confirmation.
