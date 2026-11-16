@@ -1,12 +1,13 @@
 # Morta Mesh for Android
 
-Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.8.0 / core protocol v2 with anonymous submissions and an isolated wallet foundation**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, an encrypted Private Vault, and a separate wallet entry. The first wallet milestone is Bitcoin Testnet4-only; Lama Coin and native NFTs are clearly marked as not yet connected. It has no sign-up and no central messaging server for its mesh messaging.
+Morta Mesh is an offline-first Android nearby messenger prototype. Current development branch: **0.8.0 / core protocol v2 with anonymous submissions and an isolated wallet foundation**. It includes Wi-Fi Direct, Bluetooth LE, an app-private photo/video capture flow, an encrypted Private Vault, and a separate wallet entry. The first wallet milestone is Bitcoin Testnet4-only. LAMA now has an offline Android foundation for testnet/devnet selection, Base58Check address validation, exact integer lays amount helpers, asset metadata hash verification, and a fail-closed Rust-core boundary. LAMA key generation, wallet creation, balances, transaction signing, network sync and NFT operations remain disabled until the Rust core and a public read-only gateway are integrated. It has no sign-up and no central messaging server for its mesh messaging.
 
 The Android manifest includes `INTERNET` permission for the app's **local Wi-Fi Direct TCP sockets**. This allows directly connected phones to exchange data over their local link; it is not used to connect to a central messaging server.
 
 ## Implemented networking
 
 - **Wi-Fi Direct:** discovery plus a local TCP transport for direct peers. It is preferred for large media when a direct recipient route is available.
+- **Multi-person Wi-Fi chat (draft):** a host can admit up to four other phones; invitations wait until Android reports the group formed. The client cap is provisional and requires physical-device testing.
 - **Bluetooth LE:** GATT discovery and direct text/media framing.
 - **Mesh identity gossip and relaying:** connected phones exchange signed identity records, periodically refresh the local identity advertisement, age out stale routes, and forward encrypted packets. Route advertisements can improve a route when the same announcement arrives along a shorter path. A packet ID cache suppresses duplicates; packets have a maximum eight-hop TTL and fall back to bounded flooding when a route is missing.
 - **Logical identities:** a stable UUIDv8 node ID is derived from SHA-256 of the install's P-256 public key, binding the logical identity to the signing key separately from ephemeral radio addresses. Relayed peers appear in **Nearby → Reachable through Morta Mesh** and can be opened like a normal chat.
@@ -104,8 +105,13 @@ Known limitations: background radio behavior varies by OEM/API; media (photos ov
 
 Morta Mesh adds a separate Wallet screen. The first Bitcoin integration is limited to Bitcoin Testnet4: create or restore a 12-word wallet, derive BIP-84 receive addresses, view the Testnet4 balance, and sync using Bitcoin Dev Kit. Recovery material is encrypted with an Android Keystore AES-256-GCM key and stored under no-backup app-private storage. This milestone does not expose Bitcoin mainnet, send, signing or broadcast.
 
-The Lama Coin section is intentionally a separate, not-yet-connected foundation. The uploaded Lama Coin source is a desktop Rust node/wallet rather than an Android library; it also needs its genesis, network identity and Android integration contract resolved before the app can generate Lama addresses or manage funds. Native NFTs and marketplace settlement are likewise pending native asset transaction support in the chain.
+The Lama Coin section now has a separate Android preparation layer: Testnet is the default, Devnet can be selected, Mainnet remains disabled, and the app can check address structure, checksum and network. The private LAMA repository currently contains lamanode; extracting the no-tokio/no-sled lamacore crate and UniFFI bindings is still planned. No LAMA key generation, wallet creation, balance sync, send/sign/broadcast or NFT ownership is enabled in Android yet. The node RPC is loopback-only and API-key protected; the public TLS light-client gateway is not available yet. Native asset transaction rules for testnet/devnet are already present in the Rust chain. Android asset/NFT wallet operations, ownership indexing and marketplace UI remain pending lamacore, light-client and indexer integration.
 
 Wallet activity is independent of Mortalive authentication and does not share wallet addresses, keys, balances, holdings or transaction history with Mortalive or anonymous group submissions. Any future NFT display or membership proof must be an explicit, separate opt-in.
 
 See [WALLET_ARCHITECTURE.md](WALLET_ARCHITECTURE.md) for the implemented scope, explicit limitations and follow-up engineering requirements. This is an experimental Testnet4 foundation, not a production wallet.
+
+
+## LAMA MeshPay status (MP0)
+
+MortaMesh contains offline LAMA address/amount/metadata helpers, a fail-closed Rust-core contract and a bounded in-memory carry primitive that requires Rust-core validation. This is scaffolding only: no payment request/send UI, BLE/Wi-Fi payment handoff, persistent carry queue, gateway connection or transaction broadcast is wired in. No LAMA value moves in this build. A locally stored or future gateway-accepted transaction is not a chain confirmation.

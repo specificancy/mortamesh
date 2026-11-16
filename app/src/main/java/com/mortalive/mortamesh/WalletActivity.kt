@@ -1,5 +1,8 @@
 package com.mortalive.mortamesh
 
+import com.mortalive.mortamesh.lama.LamaAddress
+import com.mortalive.mortamesh.lama.LamaNetwork
+
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
@@ -40,6 +43,7 @@ class WalletActivity : UiKitActivity() {
     private var backupPending = false
     private var lastSyncedAt: Long? = null
     private var walletScrollView: ScrollView? = null
+    private var lamaNetwork: LamaNetwork = LamaNetwork.DEFAULT
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,6 +53,10 @@ class WalletActivity : UiKitActivity() {
         lastSyncedAt = getSharedPreferences("wallet_public_metadata_v1", MODE_PRIVATE)
             .getLong("btc_testnet4_last_synced_at", 0L).takeIf { it > 0L }
         backupPending = engine.isBackupPending()
+        val savedLamaChainId = getSharedPreferences(LamaNetwork.PREFERENCES_NAME, MODE_PRIVATE)
+            .getInt(LamaNetwork.NETWORK_CHAIN_ID_KEY, LamaNetwork.DEFAULT.chainId)
+        lamaNetwork = LamaNetwork.fromChainId(savedLamaChainId)
+            ?.takeIf { it in LamaNetwork.selectable() } ?: LamaNetwork.DEFAULT
         render()
         if (walletExists) {
             openSavedWallet()
@@ -206,11 +214,26 @@ class WalletActivity : UiKitActivity() {
         body.addView(bitcoin)
         body.addView(space(12))
 
-        val lama = compactUnavailableRow(
-            title = "Lama Coin",
-            subtitle = "Not available yet · Android wallet adapter is not connected",
-            description = "The supplied Lama Coin project is currently a desktop Rust node/wallet, not an Android wallet library. The mobile adapter must be built and tested before creating addresses or handling funds. No placeholder address is generated."
-        )
+        val lama = card()
+        lama.addView(label("LAMA COIN", 10f, muted, true))
+        lama.addView(label("Lama Coin wallet foundation", 17f, ink, true).apply {
+            setPadding(0, dp(5), 0, dp(5))
+        })
+        lama.addView(label(
+            "Selected network: " + lamaNetwork.label + ". Testnet is the default; Devnet is available for development. Mainnet is disabled in this pre-release wallet.",
+            12f, muted
+        ).apply { setPadding(0, dp(3), 0, dp(10)); setLineSpacing(dp(2).toFloat(), 1f) })
+        lama.addView(secondaryButton("Change LAMA network · " + lamaNetwork.label) { chooseLamaNetwork() })
+        lama.addView(space(7))
+        lama.addView(secondaryButton("Check a LAMA address") { showLamaAddressCheckDialog() })
+        lama.addView(label(
+            "This offline check validates address format, checksum, ML-DSA-44 scheme and network only. It cannot prove ownership, balance or whether the address has already been revealed.",
+            11f, muted
+        ).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(dp(2).toFloat(), 1f) })
+        lama.addView(label(
+            "The Rust lamacore library is not bundled yet. Wallet creation, recovery, receive addresses, balances, signing, broadcasting and NFT ownership remain unavailable.",
+            11f, muted
+        ).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(dp(2).toFloat(), 1f) })
         body.addView(lama)
         body.addView(space(12))
 
@@ -462,6 +485,64 @@ class WalletActivity : UiKitActivity() {
         background = rounded(blueLight, 99)
         setPadding(dp(8), dp(5), dp(8), dp(5))
         gravity = Gravity.CENTER
+    }
+
+    private fun chooseLamaNetwork() {
+        val options = LamaNetwork.selectable()
+        AlertDialog.Builder(this)
+            .setTitle("Choose LAMA network")
+            .setItems(options.map { it.label }.toTypedArray()) { _, index ->
+                val selected = options.getOrNull(index) ?: return@setItems
+                if (selected == lamaNetwork) return@setItems
+                AlertDialog.Builder(this)
+                    .setTitle("Switch to " + selected.label + "?")
+                    .setMessage("LAMA addresses and wallet keys are network-specific. This only changes the selected network; it does not move funds or create a wallet.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Switch") { _, _ ->
+                        lamaNetwork = selected
+                        getSharedPreferences(LamaNetwork.PREFERENCES_NAME, MODE_PRIVATE)
+                            .edit().putInt(LamaNetwork.NETWORK_CHAIN_ID_KEY, selected.chainId).apply()
+                        render()
+                    }
+                    .show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showLamaAddressCheckDialog() {
+        val input = EditText(this).apply {
+            hint = "Paste a " + lamaNetwork.label + " LAMA address"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine(true)
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(label(
+                "This is an offline format check. It does not contact a node or check balance/ownership.",
+                12f, muted
+            ).apply { setPadding(0, 0, 0, dp(8)) })
+            addView(input)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Check LAMA address · " + lamaNetwork.label)
+            .setView(content)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Validate") { _, _ ->
+                val problem = LamaAddress.validate(input.text?.toString().orEmpty(), lamaNetwork)
+                val valid = problem == null
+                AlertDialog.Builder(this)
+                    .setTitle(if (valid) "Address format looks valid" else "Address check failed")
+                    .setMessage(
+                        if (valid) "The checksum, network version and ML-DSA-44 scheme match " +
+                            lamaNetwork.label + ". Ownership, balance and revealed status are not verified."
+                        else LamaAddress.message(problem!!, lamaNetwork)
+                    )
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+            .show()
     }
 
     private fun compactUnavailableRow(title: String, subtitle: String, description: String): LinearLayout =
