@@ -62,8 +62,11 @@ class LamaWalletFoundationTest {
     }
 
     @Test fun txQueueRequiresValidatorAndNeverEvictsToMakeSpace() {
-        val txid = "1".repeat(64)
-        val queue = PayTxStore(1, 10, 10, 1000, validate = { _, _ -> RelayValidation(true, txid, null) }, now = { 0L })
+        val firstTxid = "1".repeat(64)
+        val secondTxid = "2".repeat(64)
+        val queue = PayTxStore(1, 10, 10, 1000, validate = { hex, _ ->
+            RelayValidation(true, if (hex == "ab".repeat(5)) firstTxid else secondTxid, null)
+        }, now = { 0L })
         assertEquals(PayTxStore.OfferResult.STORED, queue.offer("ab".repeat(5), LamaNetwork.TESTNET))
         assertEquals(PayTxStore.OfferResult.DUPLICATE, queue.offer("ab".repeat(5), LamaNetwork.TESTNET))
         assertEquals(PayTxStore.OfferResult.CAPACITY, queue.offer("cd".repeat(5), LamaNetwork.TESTNET))
